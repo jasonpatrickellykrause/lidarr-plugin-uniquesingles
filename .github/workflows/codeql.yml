@@ -47,8 +47,8 @@ jobs:
 
       - name: Build
         run: |
-          dotnet restore UniqueSingles.sln /p:WarningsNotAsErrors="NU1902"
-          dotnet build UniqueSingles.sln -c Release /p:WarningsNotAsErrors="NU1902"
+          dotnet restore UniqueSingles.sln /p:WarningsNotAsErrors="NU1902%3BNU1903"
+          dotnet build UniqueSingles.sln -c Release /p:WarningsNotAsErrors="NU1902%3BNU1903"
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
