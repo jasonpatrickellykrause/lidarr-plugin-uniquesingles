@@ -7,7 +7,7 @@ Thanks for considering a contribution to Unique Singles.
 This repo uses a git submodule pointing at Lidarr's source (`ext/Lidarr`), which the plugin builds against.
 
 ```bash
-git clone --recurse-submodules https://github.com/jtstothard/lidarr-plugin-uniquesingles.git
+git clone --recurse-submodules https://github.com/jasonpatrickellykrause/lidarr-plugin-uniquesingles.git
 cd lidarr-plugin-uniquesingles
 # If you already cloned without --recurse-submodules:
 git submodule update --init --recursive

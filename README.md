@@ -16,11 +16,21 @@ When Lidarr monitors an artist, it tracks all release types — albums, EPs, and
 2. Paste the repository URL:
 
    ```
-   https://github.com/jtstothard/lidarr-plugin-uniquesingles
+   https://github.com/jasonpatrickellykrause/lidarr-plugin-uniquesingles
    ```
 
 3. Click **Install**
 4. Lidarr will download the plugin and restart
+
+### Switching from the original plugin
+
+This repository is a maintained fork of [jtstothard/lidarr-plugin-uniquesingles](https://github.com/jtstothard/lidarr-plugin-uniquesingles). Lidarr installs each plugin into a folder named after its GitHub owner and loads every plugin folder it finds, so the two versions do not replace each other. If the original plugin is installed, remove it before installing this one:
+
+1. Go to **System → Plugins** and uninstall the `jtstothard` Unique Singles plugin.
+2. Restart Lidarr.
+3. Install this fork using the steps above.
+
+Your Unique Singles entries under **Settings → Connect** and **Settings → Metadata** are stored by Lidarr, not by the plugin, so they are kept.
 
 ## Configuration
 
@@ -76,12 +86,10 @@ Singles with downloaded files are checked with all three tiers, and redundant on
 - [Lidarr Issue #2671](https://github.com/Lidarr/Lidarr/issues/2671) — Unmonitor singles if on album
 - [Lidarr Issue #1025](https://github.com/Lidarr/Lidarr/issues/1025) — Singles included with Albums
 
-## Support
+## Credits
 
-If you find this plugin useful, consider buying me a coffee:
-
-[☕ Ko-fi](https://ko-fi.com/trshpotato)
+Unique Singles was created by [Jay Stothard (jtstothard)](https://github.com/jtstothard). This fork carries fixes that are open as pull requests on the original repository. If you find the plugin useful, you can support the original author on [Ko-fi](https://ko-fi.com/trshpotato).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The original copyright notice is kept in the license file.

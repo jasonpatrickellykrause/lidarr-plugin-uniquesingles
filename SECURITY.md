@@ -8,7 +8,7 @@ Only the latest release of Unique Singles is supported with security fixes.
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
-Instead, report it privately via [GitHub Security Advisories](https://github.com/jtstothard/lidarr-plugin-uniquesingles/security/advisories/new).
+Instead, report it privately via [GitHub Security Advisories](https://github.com/jasonpatrickellykrause/lidarr-plugin-uniquesingles/security/advisories/new).
 
 Include as much detail as possible:
 

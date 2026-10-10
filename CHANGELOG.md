@@ -4,6 +4,8 @@ All notable changes to Unique Singles will be documented in this file.
 
 ## [Unreleased]
 
+This release is published from the fork at jasonpatrickellykrause/lidarr-plugin-uniquesingles. Each fix below is also open as a pull request on the original repository (jtstothard/lidarr-plugin-uniquesingles #27 to #32).
+
 ### Added
 
 - `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md`
@@ -11,20 +13,18 @@ All notable changes to Unique Singles will be documented in this file.
 - Dependabot config for NuGet and GitHub Actions dependencies
 - CodeQL security scanning workflow
 
+### Changed
+
+- The plugin now installs from and checks for updates against the fork. Uninstall the original plugin before installing this one; see the README.
+- The scheduled full-library scan only runs when **UniqueSingles Scan** is enabled under Settings → Metadata. Previously it was scheduled on every install, and disabling or removing the Metadata entry did not stop it.
+- Albums and EPs with a Live, Remix, DJ-mix, or Demo secondary type are no longer used as comparison sources. A live track with the same title and a similar length could previously cause the studio single to be deleted.
+- Documented that **Scan interval** is only read from the Metadata entry, that the scheduled scan uses the Connect entry's matching settings, and that singles without files are unmonitored on exact Tier 1 matches.
+
 ### Fixed
 
-- Release builds now carry the release version. Every build previously reported 1.0.2.0, so Lidarr always offered an update that never cleared after installing it (#25).
-### Changed
-
-- The scheduled full-library scan only runs when **UniqueSingles Scan** is enabled under Settings → Metadata. Previously it was scheduled on every install, and disabling or removing the Metadata entry did not stop it.
+- Release builds now carry the release version. Every build previously reported 1.0.2.0, so Lidarr always offered an update that never cleared after installing it (upstream #25).
 - The scheduled scan no longer runs on every Lidarr restart. Lidarr removes plugin task rows at startup; the plugin now restores the previous run time instead of scheduling the scan as overdue.
 - With `Single` in **Release types to compare**, every downloaded single matched its own tracks and was deleted. A single is now never compared against itself, and of two identical singles only one is removed.
-### Changed
-
-- Albums and EPs with a Live, Remix, DJ-mix, or Demo secondary type are no longer used as comparison sources. A live track with the same title and a similar length could previously cause the studio single to be deleted.
-### Changed
-
-- Documented that **Scan interval** is only read from the Metadata entry, that the scheduled scan uses the Connect entry's matching settings, and that singles without files are unmonitored on exact Tier 1 matches.
 
 ## [1.0.2] - 2025-05-28
 

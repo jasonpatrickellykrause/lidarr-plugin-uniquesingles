@@ -11,8 +11,8 @@ namespace NzbDrone.Core.Plugins;
 public sealed class UniqueSinglesPlugin : Plugin
 {
     public const string DisplayName = "Unique Singles";
-    public const string RepositoryOwner = "jtstothard";
-    public const string RepositoryUrl = "https://github.com/jtstothard/lidarr-plugin-uniquesingles";
+    public const string RepositoryOwner = "jasonpatrickellykrause";
+    public const string RepositoryUrl = "https://github.com/jasonpatrickellykrause/lidarr-plugin-uniquesingles";
 
     public override string Name => DisplayName;
 
