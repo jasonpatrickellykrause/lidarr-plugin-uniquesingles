@@ -233,7 +233,7 @@ public class SingleCleanupService : ISingleCleanupService
         var comparisonTracks = GetComparisonTracksByAlbum(albums, options);
         var candidateSingles = albums.Where(IsSingle).ToList();
 
-        _logger.Info(
+        _logger.Debug(
             "UniqueSingles scan start: artistId={0} artist='{1}' albumTrackCount={2} candidateSingles={3} comparisonReleaseTypes='{4}' durationToleranceMs={5} tier3Action='{6}'",
             artist.Id,
             artist.Name,
@@ -275,7 +275,7 @@ public class SingleCleanupService : ISingleCleanupService
 
         if (!single.Monitored)
         {
-            _logger.Info(
+            _logger.Debug(
                 "UniqueSingles cleanup skip: single already unmonitored. artistId={0} artist='{1}' singleId={2} single='{3}' reason=already-unmonitored",
                 artist.Id,
                 artist.Name,
@@ -330,7 +330,7 @@ public class SingleCleanupService : ISingleCleanupService
                 return new CleanupResult(candidatesChecked, cleaned, 0, 0, 0, 0);
             }
 
-            _logger.Info(
+            _logger.Debug(
                 "UniqueSingles cleanup skip: single has no downloaded track files and is not fully Tier-1 redundant. artistId={0} artist='{1}' singleId={2} single='{3}' reason=no-downloaded-single-tracks-not-tier1",
                 artist.Id,
                 artist.Name,
@@ -394,7 +394,7 @@ public class SingleCleanupService : ISingleCleanupService
     {
         if (!single.Monitored)
         {
-            _logger.Info(
+            _logger.Debug(
                 "UniqueSingles cleanup skip: single already unmonitored. artistId={0} artist='{1}' singleId={2} single='{3}' comparisonAlbumId={4} comparisonAlbum='{5}' reason=already-unmonitored",
                 artist.Id,
                 artist.Name,
@@ -446,7 +446,7 @@ public class SingleCleanupService : ISingleCleanupService
                 return;
             }
 
-            _logger.Info(
+            _logger.Debug(
                 "UniqueSingles cleanup skip: single has no downloaded track files and is not fully Tier-1 redundant. artistId={0} artist='{1}' singleId={2} single='{3}' comparisonAlbumId={4} comparisonAlbum='{5}' reason=no-downloaded-single-tracks-not-tier1",
                 artist.Id,
                 artist.Name,
@@ -552,7 +552,11 @@ public class SingleCleanupService : ISingleCleanupService
         foreach (var result in check.TrackResults)
         {
             var isReview = result.Tier == MatchTier.Tier3_TitleOnly && tier3Action == Tier3Action.FlagOnly;
-            _logger.Info(
+
+            // A full-library scan skips most singles; only approvals and review requests are actionable.
+            var level = isReview || decision == "cleanup-approved" ? LogLevel.Info : LogLevel.Debug;
+            _logger.Log(
+                level,
                 "UniqueSingles {0}: artistId={1} artist='{2}' singleId={3} single='{4}' comparisonAlbumId={5} comparisonAlbum='{6}' track='{7}' matchedTrack='{8}' matchTier={9} confidence={10} reason='{11}' summary='{12}'",
                 isReview ? "review-needed" : decision,
                 artist.Id,
@@ -571,7 +575,7 @@ public class SingleCleanupService : ISingleCleanupService
 
         if (check.TrackResults.Count == 0)
         {
-            _logger.Info(
+            _logger.Debug(
                 "UniqueSingles cleanup-skipped: artistId={0} artist='{1}' singleId={2} single='{3}' comparisonAlbumId={4} comparisonAlbum='{5}' reason='{6}'",
                 artist.Id,
                 artist.Name,

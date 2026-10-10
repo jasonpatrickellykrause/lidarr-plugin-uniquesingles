@@ -19,6 +19,7 @@ This release is published from the fork at jasonpatrickellykrause/lidarr-plugin-
 - The scheduled full-library scan only runs when **UniqueSingles Scan** is enabled under Settings → Metadata. Previously it was scheduled on every install, and disabling or removing the Metadata entry did not stop it.
 - Albums and EPs with a Live, Remix, DJ-mix, or Demo secondary type are no longer used as comparison sources. A live track with the same title and a similar length could previously cause the studio single to be deleted.
 - Documented where the scheduled scan appears under System → Tasks. Documented that **Scan interval** is only read from the Metadata entry, that the scheduled scan uses the Connect entry's matching settings, and that singles without files are unmonitored on exact Tier 1 matches.
+- Routine per-track and per-single log lines now log at Debug instead of Info: skipped and unmatched tracks, singles that are already unmonitored or have no files, and the per-artist scan start line. A full-library scan previously wrote one Info line per candidate track and filled Lidarr's log files. Approved cleanups, review-needed (Tier 3) tracks, unmonitor and delete results, and the final scan summary still log at Info.
 
 ### Fixed
 

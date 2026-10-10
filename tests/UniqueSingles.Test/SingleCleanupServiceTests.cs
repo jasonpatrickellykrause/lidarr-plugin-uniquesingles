@@ -141,7 +141,8 @@ public class SingleCleanupServiceTests
         Assert.Equal(0, result.Cleaned);
         Assert.Equal(1, result.Skipped);
         Assert.Equal(0, result.ReviewNeeded);
-        Assert.Contains(logger.InfoMessages, m => m.Contains("cleanup-skipped", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("cleanup-skipped", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("cleanup-skipped", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("review-needed", StringComparison.OrdinalIgnoreCase));
         Assert.Empty(deleteMediaFiles.DeletedFiles);
     }
@@ -261,7 +262,7 @@ public class SingleCleanupServiceTests
         Assert.Equal(0, result.DeleteFailures);
         Assert.DoesNotContain(importedSingle.Id, trackService.AlbumLookupIds);
         Assert.Empty(deleteMediaFiles.DeletedFiles);
-        Assert.Contains(logger.InfoMessages, m => m.Contains("reason=already-unmonitored", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("reason=already-unmonitored", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -313,7 +314,7 @@ public class SingleCleanupServiceTests
         Assert.Empty(albumService.SetMonitoredCalls);
         Assert.Empty(mediaFileService.AlbumLookupIds);
         Assert.Empty(deleteMediaFiles.DeletedFiles);
-        Assert.Contains(logger.InfoMessages, m => m.Contains("reason=no-downloaded-single-tracks", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("reason=no-downloaded-single-tracks", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -516,6 +517,42 @@ public class SingleCleanupServiceTests
         Assert.Equal(1, result.ReviewNeeded);
         Assert.Empty(deleteMediaFiles.DeletedFiles);
         Assert.Contains(logger.InfoMessages, m => m.Contains("review-needed", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ScanArtistWithOptions_LogsRoutineSkipsAtDebugAndReviewAtInfo()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var tier3Single = Album(200, "Maybe Different Version", "Single");
+        var unmatchedSingle = Album(201, "Exclusive", "Single");
+        var unmonitoredSingle = Album(202, "Old Single", "Single", monitored: false);
+        var albumService = new RecordingAlbumService(album, tier3Single, unmatchedSingle, unmonitoredSingle);
+        var logger = new RecordingLogger();
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id,
+                Track("Song", 220000, "album-mbid", fileId: 11))
+            .WithTracks(tier3Single.Id,
+                Track("Song", 180000, "single-mbid", fileId: 21))
+            .WithTracks(unmatchedSingle.Id,
+                Track("Exclusive", 190000, "single-mbid-2", fileId: 22));
+        var mediaFileService = new RecordingMediaFileService();
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles, logger);
+
+        var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album", "EP" }, Tier3Action.FlagOnly);
+        var result = service.ScanArtistWithOptions(artist, options);
+
+        Assert.Equal(1, result.ReviewNeeded);
+        Assert.Empty(deleteMediaFiles.DeletedFiles);
+
+        Assert.Contains(logger.InfoMessages, m => m.Contains("review-needed", StringComparison.Ordinal) && m.Contains("track='Song'", StringComparison.Ordinal));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("cleanup-skipped", StringComparison.Ordinal) && m.Contains("track='Exclusive'", StringComparison.Ordinal) && m.Contains("matchTier=NoMatch", StringComparison.Ordinal));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("single already unmonitored", StringComparison.Ordinal));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("UniqueSingles scan start", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("cleanup-skipped", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("already unmonitored", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("scan start", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1099,6 +1136,8 @@ public class SingleCleanupServiceTests
         }
 
         public Logger Logger { get; }
+
+        public List<string> DebugMessages => Entries.Where(entry => entry.StartsWith("Debug|", StringComparison.Ordinal)).ToList();
 
         public List<string> InfoMessages => Entries.Where(entry => entry.StartsWith("Info|", StringComparison.Ordinal)).ToList();
 
