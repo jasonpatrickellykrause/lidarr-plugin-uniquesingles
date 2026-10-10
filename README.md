@@ -71,7 +71,7 @@ Unique Singles uses a 3-tier cascade to match single tracks against album/EP tra
 ## How It Works
 
 - **On import:** When an album or EP is imported, Unique Singles checks whether any monitored singles contain tracks matching the imported tracks. Matching singles are unmonitored and their files deleted.
-- **Scheduled scan:** A full-library scan runs periodically (configurable interval) to catch any singles that were missed by import-triggered cleanup — for example, singles added before the plugin was installed. The scan is off by default. To turn it on, go to **Settings → Metadata**, open **UniqueSingles Scan**, and tick **Enable**. Untick it to stop the scan.
+- **Scheduled scan:** A full-library scan runs periodically (configurable interval) to catch any singles that were missed by import-triggered cleanup — for example, singles added before the plugin was installed. The scan is off by default. To turn it on, go to **Settings → Metadata**, open **UniqueSingles Scan**, and tick **Enable**. Untick it to stop the scan. While it is enabled, the scan is listed under **System → Tasks → Scheduled** as **Unique Singles Scan**, where you can see its last and next run and start it manually.
 
 Singles with downloaded files are checked with all three tiers, and redundant ones are unmonitored and their files deleted. Singles without downloaded files are unmonitored only when every track has an exact MusicBrainz Recording MBID match (Tier 1) on a downloaded album or EP; otherwise they are left alone. Albums and EPs must be monitored and have files imported to be used as comparison sources. Releases with a Live, Remix, DJ-mix, or Demo secondary type are never used as comparison sources, because their tracks often share a title and length with the studio recording.
 
@@ -79,7 +79,7 @@ Singles with downloaded files are checked with all three tiers, and redundant on
 
 - **Requires Lidarr nightly branch.** Plugin support is not available in the stable release channel.
 - **Tubifarry coexistence.** If Tubifarry's QueueCleaner is installed alongside UniqueSingles, a plugin dependency conflict may occur. Workaround: disable Tubifarry's QueueCleaner, or use only UniqueSingles for cleanup.
-- **Scheduled scan location.** The scheduled scan appears under **Settings → Metadata** (not Tasks) due to Lidarr's limited plugin scheduling API. This is a cosmetic issue and does not affect functionality.
+- **Scan settings live under Metadata.** Lidarr has no settings page for plugin tasks, so the scan is turned on and its interval is set under **Settings → Metadata → UniqueSingles Scan**, not on the Tasks page. Matching settings still come from the **Settings → Connect** entry.
 
 ## Related
 
