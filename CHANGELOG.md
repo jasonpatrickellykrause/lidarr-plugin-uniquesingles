@@ -22,6 +22,9 @@ All notable changes to Unique Singles will be documented in this file.
 ### Changed
 
 - Albums and EPs with a Live, Remix, DJ-mix, or Demo secondary type are no longer used as comparison sources. A live track with the same title and a similar length could previously cause the studio single to be deleted.
+### Changed
+
+- Documented that **Scan interval** is only read from the Metadata entry, that the scheduled scan uses the Connect entry's matching settings, and that singles without files are unmonitored on exact Tier 1 matches.
 
 ## [1.0.2] - 2025-05-28
 
