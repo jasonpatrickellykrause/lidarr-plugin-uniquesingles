@@ -6,6 +6,22 @@ When Lidarr monitors an artist, it tracks all release types — albums, EPs, and
 
 **Example:** You download Chappell Roan's single "HOT TO GO!" and later download the album "The Rise and Fall of a Midwest Princess". Unique Singles detects that "HOT TO GO!" on the single matches the album track, unmonitors the single, and deletes its files.
 
+## What's different in this fork
+
+This fork fixes problems in the original plugin, most of which could delete files you didn't expect to lose. Each fix is also open as a pull request on the original repository.
+
+| Change | Upstream PR |
+|--------|-------------|
+| The scheduled full-library scan stays off until you enable it. The original plugin ran it on every install and had no way to turn it off. | [#28](https://github.com/jtstothard/lidarr-plugin-uniquesingles/pull/28) |
+| The scan keeps its schedule across Lidarr restarts. The original plugin could run it on every restart, or start it again as soon as each run finished. | [#29](https://github.com/jtstothard/lidarr-plugin-uniquesingles/pull/29) |
+| The plugin never compares a single with its own tracks. With `Single` in **Release types to compare**, the original plugin deleted every downloaded single. | [#30](https://github.com/jtstothard/lidarr-plugin-uniquesingles/pull/30) |
+| The plugin skips live, remix, DJ-mix, and demo releases when comparing, so a live track can no longer make it delete the studio single. | [#31](https://github.com/jtstothard/lidarr-plugin-uniquesingles/pull/31) |
+| Releases report their real version, so Lidarr's update notice clears after you update. | [#27](https://github.com/jtstothard/lidarr-plugin-uniquesingles/pull/27) |
+| The README and setting help text explain which settings entry each option comes from. | [#32](https://github.com/jtstothard/lidarr-plugin-uniquesingles/pull/32) |
+| Routine scan decisions log at Debug instead of Info, so a full-library scan no longer fills Lidarr's log files. | Fork only |
+
+If you are switching from the original plugin and want the scheduled scan to keep running, enable it after installing. See [How It Works](#how-it-works).
+
 ## Requirements
 
 - **Lidarr nightly branch** — plugin support is not available in the stable release channel.
@@ -20,7 +36,9 @@ When Lidarr monitors an artist, it tracks all release types — albums, EPs, and
    ```
 
 3. Click **Install**
-4. Lidarr will download the plugin and restart
+4. When Lidarr reports that it installed the plugin, restart Lidarr. The plugin loads on the next start.
+
+To update, install from the same URL again and restart Lidarr.
 
 ### Switching from the original plugin
 
@@ -75,6 +93,17 @@ Unique Singles uses a 3-tier cascade to match single tracks against album/EP tra
 
 Singles with downloaded files are checked with all three tiers, and redundant ones are unmonitored and their files deleted. Singles without downloaded files are unmonitored only when every track has an exact MusicBrainz Recording MBID match (Tier 1) on a downloaded album or EP; otherwise they are left alone. Albums and EPs must be monitored and have files imported to be used as comparison sources. Releases with a Live, Remix, DJ-mix, or Demo secondary type are never used as comparison sources, because their tracks often share a title and length with the studio recording.
 
+## Logs
+
+At Lidarr's default **Info** log level, Unique Singles logs the following. Search the logs for `UniqueSingles` to find them.
+
+- Approved cleanups
+- Title-only (Tier 3) matches that need review
+- Unmonitor and delete results
+- A summary at the end of each scan
+
+To see why the plugin skipped or matched each single and track, set **Settings → General → Logging → Log Level** to **Debug**. A full-library scan writes one line per candidate track at that level, so set it back to **Info** afterward.
+
 ## Known Issues
 
 - **Requires Lidarr nightly branch.** Plugin support is not available in the stable release channel.
@@ -88,7 +117,7 @@ Singles with downloaded files are checked with all three tiers, and redundant on
 
 ## Credits
 
-Unique Singles was created by [Jay Stothard (jtstothard)](https://github.com/jtstothard). This fork carries fixes that are open as pull requests on the original repository. If you find the plugin useful, you can support the original author on [Ko-fi](https://ko-fi.com/trshpotato).
+Unique Singles was created by [Jay Stothard (jtstothard)](https://github.com/jtstothard). This fork carries fixes that are open as pull requests on the original repository; see [What's different in this fork](#whats-different-in-this-fork). If you find the plugin useful, you can support the original author on [Ko-fi](https://ko-fi.com/trshpotato).
 
 ## License
 
