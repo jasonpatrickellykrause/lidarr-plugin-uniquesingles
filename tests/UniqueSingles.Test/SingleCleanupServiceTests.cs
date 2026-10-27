@@ -1297,12 +1297,15 @@ public class SingleCleanupServiceTests
     // "Single" as a comparison type
     // ============================================================
 
-    [Fact]
-    public void ScanArtistWithOptions_SingleComparisonType_DoesNotMatchSingleAgainstItself()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cleanup_SingleComparisonType_DoesNotMatchSingleAgainstItself(bool viaImport)
     {
         var artist = Artist();
         var single = Album(200, "Only Single", "Single");
-        var albumService = new RecordingAlbumService(single);
+        var imported = Album(100, "Imported Album", "Album");
+        var albumService = viaImport ? new RecordingAlbumService(imported, single) : new RecordingAlbumService(single);
 
         var trackService = new RecordingTrackService()
             .WithTracks(single.Id, Track("Song", 180000, "single-mbid", fileId: 21));
@@ -1313,7 +1316,9 @@ public class SingleCleanupServiceTests
         var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
         var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album", "EP", "Single" }, Tier3Action.FlagOnly);
 
-        var result = service.ScanArtistWithOptions(artist, options);
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, imported, options)
+            : service.ScanArtistWithOptions(artist, options);
 
         Assert.Equal(1, result.CandidatesChecked);
         Assert.Equal(0, result.Cleaned);
@@ -1321,13 +1326,16 @@ public class SingleCleanupServiceTests
         Assert.Empty(deleteMediaFiles.DeletedFiles);
     }
 
-    [Fact]
-    public void ScanArtistWithOptions_SingleComparisonType_KeepsOneOfTwoIdenticalSingles()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cleanup_SingleComparisonType_KeepsOneOfTwoIdenticalSingles(bool viaImport)
     {
         var artist = Artist();
         var first = Album(200, "Song", "Single");
         var second = Album(300, "Song", "Single");
-        var albumService = new RecordingAlbumService(first, second);
+        var imported = Album(100, "Imported Album", "Album");
+        var albumService = viaImport ? new RecordingAlbumService(imported, first, second) : new RecordingAlbumService(first, second);
 
         var trackService = new RecordingTrackService()
             .WithTracks(first.Id, Track("Song", 180000, "shared-mbid", fileId: 21))
@@ -1340,7 +1348,9 @@ public class SingleCleanupServiceTests
         var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
         var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album", "EP", "Single" }, Tier3Action.FlagOnly);
 
-        var result = service.ScanArtistWithOptions(artist, options);
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, imported, options)
+            : service.ScanArtistWithOptions(artist, options);
 
         Assert.Equal(2, result.CandidatesChecked);
         Assert.Equal(1, result.Cleaned);
@@ -1348,4 +1358,5 @@ public class SingleCleanupServiceTests
         Assert.Single(albumService.SetMonitoredCalls);
         Assert.Single(deleteMediaFiles.DeletedFiles);
     }
+
 }
