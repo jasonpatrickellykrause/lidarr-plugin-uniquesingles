@@ -15,6 +15,8 @@ All notable changes to Unique Singles will be documented in this file.
 
 - Albums and EPs with a Live, Remix, DJ-mix, or Demo secondary type are no longer used as comparison sources. A live track with the same title and a similar length could previously cause the studio single to be deleted.
 
+- Build against checksum-pinned official Lidarr binaries instead of recompiling its source and dependency tree.
+
 ## [1.0.2] - 2025-05-28
 
 ### Added
