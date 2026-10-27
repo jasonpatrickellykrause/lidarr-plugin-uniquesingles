@@ -15,6 +15,10 @@ All notable changes to Unique Singles will be documented in this file.
 
 - Release builds now carry the release version. Every build previously reported 1.0.2.0, so Lidarr always offered an update that never cleared after installing it (#25).
 
+### Changed
+
+- Build against checksum-pinned official Lidarr binaries instead of recompiling its source and dependency tree.
+
 ## [1.0.2] - 2025-05-28
 
 ### Added

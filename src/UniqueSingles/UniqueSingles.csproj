@@ -8,22 +8,15 @@
     <!-- CI passes PluginVersion (the release tag) so Lidarr sees the real installed version. -->
     <Version Condition="'$(PluginVersion)' != ''">$(PluginVersion)</Version>
     <Version Condition="'$(Version)' == ''">1.0.2</Version>
-    <!-- Lidarr parses InformationalVersion with System.Version; a "+<commit>" suffix makes it fall back to 1.0.2.0. -->
+    <!-- Lidarr requires a numeric informational version without a commit suffix. -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <!-- Disable analyzers inherited from Lidarr's Directory.Build.props -->
+    <!-- Preserve the plugin's existing analyzer settings. -->
     <EnableAnalyzers>false</EnableAnalyzers>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
-    <NoWarn>$(NoWarn);CS1591;NU1902</NoWarn>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\..\ext\Lidarr\src\NzbDrone.Core\Lidarr.Core.csproj">
-      <Private>false</Private>
-    </ProjectReference>
-    <ProjectReference Include="..\..\ext\Lidarr\src\NzbDrone.Common\Lidarr.Common.csproj">
-      <Private>false</Private>
-    </ProjectReference>
-  </ItemGroup>
+  <Import Project="../../LidarrReferences.targets" />
 
 </Project>

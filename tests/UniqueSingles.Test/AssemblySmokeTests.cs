@@ -99,4 +99,22 @@ public class AssemblySmokeTests
         Assert.NotNull(parsed);
         Assert.Equal(parsed, new UniqueSinglesPlugin().InstalledVersion);
     }
+    [Fact]
+    public void Assembly_VersionsMatchExpectedReleaseWhenProvided()
+    {
+        var expected = Environment.GetEnvironmentVariable("EXPECTED_PLUGIN_VERSION");
+        if (string.IsNullOrEmpty(expected))
+        {
+            return;
+        }
+
+        var assembly = typeof(UniqueSinglesPlugin).Assembly;
+        Assert.Equal(Version.Parse(expected), assembly.GetName().Version);
+        Assert.Equal(expected, assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyFileVersionAttribute), false)
+            .Cast<System.Reflection.AssemblyFileVersionAttribute>().Single().Version);
+        Assert.Equal(expected, assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .Cast<System.Reflection.AssemblyInformationalVersionAttribute>().Single().InformationalVersion);
+        Assert.Equal(PluginVersion.Parse(expected), new UniqueSinglesPlugin().InstalledVersion);
+    }
+
 }
