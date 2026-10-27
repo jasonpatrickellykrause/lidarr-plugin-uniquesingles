@@ -14,6 +14,7 @@ All notable changes to Unique Singles will be documented in this file.
 ### Changed
 
 - Documented that **Scan interval** is only read from the Metadata entry, that the scheduled scan uses the Connect entry's matching settings, and that singles without files are unmonitored on exact Tier 1 matches.
+- Build against checksum-pinned official Lidarr binaries instead of recompiling its source and dependency tree.
 
 ## [1.0.2] - 2025-05-28
 

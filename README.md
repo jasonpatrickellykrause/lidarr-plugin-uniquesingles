@@ -40,7 +40,7 @@ After installation, add a Unique Singles connection:
 | **Title-only match action** | Flag for review | What to do when a single track matches an album track by title alone (no duration match). See matching tiers below. |
 | **Scan interval (minutes)** | 1440 (24 hours) | How often to run an automatic full-library scan. Minimum 60 minutes. Only read from the **UniqueSingles Scan** entry under **Settings → Metadata**; the value on the Connect entry is ignored. |
 
-The same settings form appears in two places. The Connect entry controls import-triggered cleanup, and when it exists the scheduled scan uses its matching settings too. The Metadata entry controls the scan interval.
+The same settings form appears in two places. The Connect entry controls import-triggered cleanup, and when it exists the scheduled scan uses its matching settings too. The Metadata entry controls the scan interval and supplies matching settings when no Connect entry is available; if neither supplies matching settings, the scan uses defaults.
 
 ## Matching Tiers
 
@@ -63,7 +63,7 @@ Unique Singles uses a 3-tier cascade to match single tracks against album/EP tra
 - **On import:** When an album or EP is imported, Unique Singles checks whether any monitored singles contain tracks matching the imported tracks. Matching singles are unmonitored and their files deleted.
 - **Scheduled scan:** A full-library scan runs periodically (configurable interval) to catch any singles that were missed by import-triggered cleanup — for example, singles added before the plugin was installed.
 
-Singles with downloaded files are checked with all three tiers, and redundant ones are unmonitored and their files deleted. Singles without downloaded files are unmonitored only when every track has an exact MusicBrainz Recording MBID match (Tier 1) on a downloaded album or EP; otherwise they are left alone. Albums and EPs must be monitored and have files imported to be used as comparison sources.
+Singles with downloaded files are checked with all three tiers, and redundant ones are unmonitored and their files deleted. Singles without downloaded files are unmonitored only when every track has an exact MusicBrainz Recording MBID match (Tier 1) against downloaded tracks on monitored releases of the configured comparison types (Album and EP by default); otherwise they are left alone. Only downloaded tracks on those monitored releases are used as comparison sources.
 
 ## Known Issues
 
