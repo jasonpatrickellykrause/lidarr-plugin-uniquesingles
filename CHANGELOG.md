@@ -15,6 +15,10 @@ All notable changes to Unique Singles will be documented in this file.
 
 - With `Single` in **Release types to compare**, every downloaded single matched its own tracks and was deleted. A single is now never compared against itself, and of two identical singles only one is removed.
 
+### Changed
+
+- Build against checksum-pinned official Lidarr binaries instead of recompiling its source and dependency tree.
+
 ## [1.0.2] - 2025-05-28
 
 ### Added
