@@ -303,6 +303,53 @@ public class ScheduledTaskServiceTests
         Assert.Empty(repo.AllTasks);
     }
 
+    [Theory]
+    [InlineData("initialize")]
+    [InlineData("add")]
+    [InlineData("update")]
+    [InlineData("delete")]
+    public void DisabledProvider_CacheOnlyTask_IsNoLongerPending(string trigger)
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 120, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider) { EnabledProviders = new List<IMetadata>() };
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+        var taskManager = new TaskManager(repo, null!, cache, logger.Logger);
+        cache.GetCache<ScheduledTask>(typeof(TaskManager)).Set(
+            typeof(UniqueSinglesScanCommand).FullName!,
+            new ScheduledTask
+            {
+                TypeName = typeof(UniqueSinglesScanCommand).FullName!,
+                Interval = 120,
+                LastExecution = DateTime.UtcNow.AddDays(-2)
+            });
+        Assert.Single(taskManager.GetPending());
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        var definition = new MetadataDefinition { Id = 1, Enable = false };
+        switch (trigger)
+        {
+            case "initialize":
+                service.InitializeTasks();
+                break;
+            case "add":
+                service.Handle(new ProviderAddedEvent<IMetadata>(definition));
+                break;
+            case "update":
+                service.Handle(new ProviderUpdatedEvent<IMetadata>(definition));
+                break;
+            case "delete":
+                service.Handle(new ProviderDeletedEvent<IMetadata>(definition.Id));
+                break;
+        }
+
+        Assert.Empty(taskManager.GetPending());
+        Assert.Empty(repo.AllTasks);
+        Assert.Empty(repo.InsertedTasks);
+    }
+
     // ── Stub implementations ──────────────────────────────────────────
 
     private sealed class StubScheduledTaskProvider : IMetadata, IProvideScheduledTask
