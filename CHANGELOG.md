@@ -15,6 +15,10 @@ All notable changes to Unique Singles will be documented in this file.
 
 - The scheduled scan no longer runs on every Lidarr restart. Lidarr removes plugin task rows at startup; the plugin now restores the previous run time instead of scheduling the scan as overdue.
 
+### Changed
+
+- Build against checksum-pinned official Lidarr binaries instead of recompiling its source and dependency tree.
+
 ## [1.0.2] - 2025-05-28
 
 ### Added
