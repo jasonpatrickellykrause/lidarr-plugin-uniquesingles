@@ -138,7 +138,7 @@ public class SingleCleanupService : ISingleCleanupService
 
         var albums = GetAlbumsForArtist(artist);
         var comparisonAlbums = albums.Where(a => a.Id != importedSingle.Id).ToList();
-        var albumTracks = GetDownloadedAlbumOrEpTracks(comparisonAlbums, options);
+        var comparisonTracks = GetComparisonTracksByAlbum(comparisonAlbums, options);
 
         _logger.Info(
             "UniqueSingles self-check start: artistId={0} artist='{1}' singleId={2} single='{3}' albumTrackCount={4} comparisonReleaseTypes='{5}' durationToleranceMs={6} tier3Action='{7}'",
@@ -146,12 +146,12 @@ public class SingleCleanupService : ISingleCleanupService
             artist.Name,
             importedSingle.Id,
             importedSingle.Title,
-            albumTracks.Count,
+            comparisonTracks.Values.Sum(t => t.Count),
             string.Join(",", options.ComparisonReleaseTypes.OrderBy(t => t)),
             options.DurationToleranceMs,
             options.Tier3Action);
 
-        return CheckAndCleanSingleWithStats(artist, importedSingle, null, albumTracks, options);
+        return CheckAndCleanSingleWithStats(artist, importedSingle, null, comparisonTracks, options);
     }
 
     /// <summary>
@@ -187,7 +187,7 @@ public class SingleCleanupService : ISingleCleanupService
         }
 
         var albums = GetAlbumsForArtist(artist);
-        var albumTracks = GetDownloadedAlbumOrEpTracks(albums, options);
+        var comparisonTracks = GetComparisonTracksByAlbum(albums, options);
         var candidateSingles = albums
             .Where(a => IsSingle(a) && a.Id != importedAlbum.Id)
             .ToList();
@@ -198,7 +198,7 @@ public class SingleCleanupService : ISingleCleanupService
             artist.Name,
             importedAlbum.Id,
             importedAlbum.Title,
-            albumTracks.Count,
+            comparisonTracks.Values.Sum(t => t.Count),
             candidateSingles.Count,
             string.Join(",", options.ComparisonReleaseTypes.OrderBy(t => t)),
             options.DurationToleranceMs,
@@ -208,7 +208,7 @@ public class SingleCleanupService : ISingleCleanupService
 
         foreach (var single in candidateSingles)
         {
-            result += CheckAndCleanSingleWithStats(artist, single, importedAlbum, albumTracks, options);
+            result += CheckAndCleanSingleWithStats(artist, single, importedAlbum, comparisonTracks, options);
         }
 
         return result;
@@ -230,14 +230,14 @@ public class SingleCleanupService : ISingleCleanupService
         }
 
         var albums = GetAlbumsForArtist(artist);
-        var albumTracks = GetDownloadedAlbumOrEpTracks(albums, options);
+        var comparisonTracks = GetComparisonTracksByAlbum(albums, options);
         var candidateSingles = albums.Where(IsSingle).ToList();
 
         _logger.Info(
             "UniqueSingles scan start: artistId={0} artist='{1}' albumTrackCount={2} candidateSingles={3} comparisonReleaseTypes='{4}' durationToleranceMs={5} tier3Action='{6}'",
             artist.Id,
             artist.Name,
-            albumTracks.Count,
+            comparisonTracks.Values.Sum(t => t.Count),
             candidateSingles.Count,
             string.Join(",", options.ComparisonReleaseTypes.OrderBy(t => t)),
             options.DurationToleranceMs,
@@ -247,7 +247,7 @@ public class SingleCleanupService : ISingleCleanupService
 
         foreach (var single in candidateSingles)
         {
-            result += CheckAndCleanSingleWithStats(artist, single, null, albumTracks, options);
+            result += CheckAndCleanSingleWithStats(artist, single, null, comparisonTracks, options);
         }
 
         return result;
@@ -257,9 +257,15 @@ public class SingleCleanupService : ISingleCleanupService
         Artist artist,
         Album single,
         Album? comparisonAlbumContext,
-        List<Track> albumTracks,
+        Dictionary<int, List<Track>> comparisonTracks,
         SingleCleanupOptions options)
     {
+        // Never compare a single against its own tracks (possible when "Single" is a comparison type).
+        var albumTracks = comparisonTracks
+            .Where(entry => entry.Key != single.Id)
+            .SelectMany(entry => entry.Value)
+            .ToList();
+
         var candidatesChecked = 1;
         var cleaned = 0;
         var skipped = 0;
@@ -367,6 +373,11 @@ public class SingleCleanupService : ISingleCleanupService
             unmonitorFailures = 1;
             return new CleanupResult(candidatesChecked, cleaned, 0, 0, unmonitorFailures, 0);
         }
+
+        // The single is now unmonitored and its files are about to be deleted, so it can no longer
+        // stand in for another candidate. Without this, two identical singles would each match the
+        // other and both be deleted.
+        comparisonTracks.Remove(single.Id);
 
         if (!TryDeleteSingleFiles(artist, single, comparisonAlbumContext))
         {
@@ -481,7 +492,16 @@ public class SingleCleanupService : ISingleCleanupService
 
     private List<Track> GetDownloadedAlbumOrEpTracks(List<Album> albums, SingleCleanupOptions options)
     {
-        var tracks = new List<Track>();
+        return GetComparisonTracksByAlbum(albums, options).Values.SelectMany(t => t).ToList();
+    }
+
+    /// <summary>
+    /// Loads downloaded comparison tracks grouped by source album id, so a candidate single's
+    /// own tracks can be excluded when "Single" is a configured comparison type.
+    /// </summary>
+    private Dictionary<int, List<Track>> GetComparisonTracksByAlbum(List<Album> albums, SingleCleanupOptions options)
+    {
+        var tracks = new Dictionary<int, List<Track>>();
 
         foreach (var album in albums.Where(a => options.ShouldCompareAgainstType(a.AlbumType)).Where(a => a.Monitored))
         {
@@ -498,7 +518,7 @@ public class SingleCleanupService : ISingleCleanupService
             try
             {
                 var albumTracks = _trackService.GetTracksByAlbum(album.Id) ?? new List<Track>();
-                tracks.AddRange(albumTracks.Where(t => t.HasFile));
+                tracks[album.Id] = albumTracks.Where(t => t.HasFile).ToList();
             }
             catch (Exception ex)
             {
