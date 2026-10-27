@@ -33,6 +33,13 @@ namespace NzbDrone.Core.Plugins.Scheduling
         /// </summary>
         private readonly HashSet<string> _registeredCommandTypes = new();
 
+        /// <summary>
+        /// ScheduledTask rows captured before Lidarr's TaskManager removes non-built-in
+        /// tasks at startup, keyed by TypeName. Used to restore LastExecution so a
+        /// restart does not make the task due immediately.
+        /// </summary>
+        private Dictionary<string, ScheduledTask> _capturedTasks = new();
+
         public ScheduledTaskService(
             IMetadataFactory metadataFactory,
             IScheduledTaskRepository scheduledTaskRepository,
@@ -52,6 +59,13 @@ namespace NzbDrone.Core.Plugins.Scheduling
             var provider = _metadataFactory.GetInstance((MetadataDefinition)message.Definition);
             if (provider is IProvideScheduledTask scheduledTaskProvider)
             {
+                if (!message.Definition.Enable)
+                {
+                    _logger.Debug("ProviderAdded: {0} is disabled, not registering scheduled task", scheduledTaskProvider.CommandType.Name);
+                    CleanupOrphanedTasks();
+                    return;
+                }
+
                 _logger.Debug("ProviderAdded: registering scheduled task for {0}", scheduledTaskProvider.CommandType.Name);
                 RegisterTask(scheduledTaskProvider);
             }
@@ -64,6 +78,13 @@ namespace NzbDrone.Core.Plugins.Scheduling
             var provider = _metadataFactory.GetInstance((MetadataDefinition)message.Definition);
             if (provider is IProvideScheduledTask scheduledTaskProvider)
             {
+                if (!message.Definition.Enable)
+                {
+                    _logger.Debug("ProviderUpdated: {0} is disabled, removing scheduled task", scheduledTaskProvider.CommandType.Name);
+                    CleanupOrphanedTasks();
+                    return;
+                }
+
                 _logger.Debug("ProviderUpdated: updating scheduled task for {0}", scheduledTaskProvider.CommandType.Name);
                 UpdateTask(scheduledTaskProvider);
             }
@@ -79,12 +100,14 @@ namespace NzbDrone.Core.Plugins.Scheduling
         }
 
         /// <summary>
-        /// Called at startup to ensure all IProvideScheduledTask providers have
+        /// Called at startup to ensure all enabled IProvideScheduledTask providers have
         /// ScheduledTask rows. Idempotent — skips rows that already exist.
+        /// Lidarr creates a disabled definition for every metadata provider automatically,
+        /// so only providers the user has enabled under Settings > Metadata are scheduled.
         /// </summary>
         public void InitializeTasks()
         {
-            var providers = _metadataFactory.GetAvailableProviders()
+            var providers = _metadataFactory.Enabled()
                 .OfType<IProvideScheduledTask>()
                 .ToList();
 
@@ -103,6 +126,24 @@ namespace NzbDrone.Core.Plugins.Scheduling
             }
 
             CleanupOrphanedTasks();
+        }
+
+        /// <summary>
+        /// Snapshots existing ScheduledTask rows. Called on ApplicationStartingEvent,
+        /// before TaskManager deletes rows it does not recognise.
+        /// </summary>
+        public void CaptureExistingTasks()
+        {
+            try
+            {
+                _capturedTasks = _scheduledTaskRepository.All()
+                    .GroupBy(t => t.TypeName)
+                    .ToDictionary(g => g.Key, g => g.First());
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, "Failed to capture existing scheduled tasks");
+            }
         }
 
         private void RegisterTask(IProvideScheduledTask provider)
@@ -127,24 +168,36 @@ namespace NzbDrone.Core.Plugins.Scheduling
                 return;
             }
 
-            var initialExecutionTime = DateTime.UtcNow.AddMinutes(-provider.IntervalMinutes - 1);
             var task = new ScheduledTask
             {
                 TypeName = typeName,
                 Interval = provider.IntervalMinutes,
-                Priority = provider.Priority,
-                LastExecution = initialExecutionTime,
-                LastStartTime = initialExecutionTime
+                Priority = provider.Priority
             };
+
+            if (_capturedTasks.TryGetValue(typeName, out var captured))
+            {
+                // Row was removed by TaskManager during startup; keep the previous run time.
+                task.LastExecution = captured.LastExecution;
+                task.LastStartTime = captured.LastStartTime == default ? captured.LastExecution : captured.LastStartTime;
+                _capturedTasks.Remove(typeName);
+            }
+            else
+            {
+                var initialExecutionTime = DateTime.UtcNow.AddMinutes(-provider.IntervalMinutes - 1);
+                task.LastExecution = initialExecutionTime;
+                task.LastStartTime = initialExecutionTime;
+            }
 
             _scheduledTaskRepository.Insert(task);
             _cache.Set(typeName, task);
             _registeredCommandTypes.Add(typeName);
             _logger.Info(
-                "Registered scheduled task: {0} interval={1}min priority={2} firstRunDue=immediate",
+                "Registered scheduled task: {0} interval={1}min priority={2} nextRunDue={3:u}",
                 typeName,
                 provider.IntervalMinutes,
-                provider.Priority);
+                provider.Priority,
+                task.LastExecution.AddMinutes(provider.IntervalMinutes));
         }
 
         private void UpdateTask(IProvideScheduledTask provider)
@@ -174,17 +227,24 @@ namespace NzbDrone.Core.Plugins.Scheduling
         }
 
         /// <summary>
-        /// Removes ScheduledTask rows for command types that were previously registered
-        /// by this service but no longer have a corresponding IProvideScheduledTask provider.
+        /// Removes ScheduledTask rows for command types that no longer have an enabled
+        /// IProvideScheduledTask provider. Candidates are the types registered by this
+        /// service plus the types of every available provider, so rows persisted by an
+        /// earlier run are removed once their provider is disabled.
         /// </summary>
         private void CleanupOrphanedTasks()
         {
-            var activeCommandTypes = _metadataFactory.GetAvailableProviders()
+            var activeCommandTypes = _metadataFactory.Enabled()
                 .OfType<IProvideScheduledTask>()
                 .Select(p => p.CommandType.FullName!)
                 .ToHashSet();
 
+            var knownCommandTypes = _metadataFactory.GetAvailableProviders()
+                .OfType<IProvideScheduledTask>()
+                .Select(p => p.CommandType.FullName!);
+
             var orphaned = _registeredCommandTypes
+                .Union(knownCommandTypes)
                 .Where(registered => !activeCommandTypes.Contains(registered))
                 .ToList();
 
@@ -194,10 +254,12 @@ namespace NzbDrone.Core.Plugins.Scheduling
                 if (task != null)
                 {
                     _scheduledTaskRepository.Delete(task.Id);
-                    _cache.Remove(typeName);
                     _logger.Info("Removed orphaned scheduled task: {0}", typeName);
                 }
 
+                // The TaskManager cache can hold the task even when its row is gone,
+                // and the Scheduler reads pending tasks from the cache.
+                _cache.Remove(typeName);
                 _registeredCommandTypes.Remove(typeName);
             }
         }

@@ -1,6 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using DryIoc;
+using DryIoc.Microsoft.DependencyInjection;
+using NzbDrone.Common.Composition.Extensions;
+using NzbDrone.Core.Messaging.Events;
 using NLog;
 using NLog.Config;
 using NLog.Targets;
@@ -34,7 +39,7 @@ public class ScheduledTaskServiceTests
         using var logger = new TestLogger();
 
         var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
-        var definition = new MetadataDefinition { Id = 1 };
+        var definition = new MetadataDefinition { Id = 1, Enable = true };
         var evt = new ProviderAddedEvent<IMetadata>(definition);
 
         service.Handle(evt);
@@ -53,7 +58,7 @@ public class ScheduledTaskServiceTests
         using var logger = new TestLogger();
 
         var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
-        var definition = new MetadataDefinition { Id = 1 };
+        var definition = new MetadataDefinition { Id = 1, Enable = true };
         var evt = new ProviderAddedEvent<IMetadata>(definition);
 
         service.Handle(evt);
@@ -87,7 +92,7 @@ public class ScheduledTaskServiceTests
         repo.AllTasks.Add(existing);
 
         var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
-        var definition = new MetadataDefinition { Id = 1 };
+        var definition = new MetadataDefinition { Id = 1, Enable = true };
         service.Handle(new ProviderAddedEvent<IMetadata>(definition));
 
         // Should update, not insert
@@ -117,7 +122,7 @@ public class ScheduledTaskServiceTests
         repo.AllTasks.Add(existing);
 
         var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
-        var definition = new MetadataDefinition { Id = 1 };
+        var definition = new MetadataDefinition { Id = 1, Enable = true };
         service.Handle(new ProviderUpdatedEvent<IMetadata>(definition));
 
         Assert.Empty(repo.InsertedTasks);
@@ -136,7 +141,7 @@ public class ScheduledTaskServiceTests
         using var logger = new TestLogger();
 
         var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
-        var definition = new MetadataDefinition { Id = 1 };
+        var definition = new MetadataDefinition { Id = 1, Enable = true };
         service.Handle(new ProviderUpdatedEvent<IMetadata>(definition));
 
         Assert.Empty(repo.InsertedTasks);
@@ -155,7 +160,7 @@ public class ScheduledTaskServiceTests
 
         // Register a task first
         var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
-        var definition = new MetadataDefinition { Id = 1 };
+        var definition = new MetadataDefinition { Id = 1, Enable = true };
         service.Handle(new ProviderAddedEvent<IMetadata>(definition));
         Assert.Single(repo.InsertedTasks);
 
@@ -219,6 +224,283 @@ public class ScheduledTaskServiceTests
         // Good provider should still be registered despite failing one
         Assert.Single(repo.InsertedTasks);
         Assert.True(logger.HasMessageContaining("Failed to register scheduled task"));
+    }
+
+    // ── Enable flag (opt-in) ──────────────────────────────────────────
+
+    [Fact]
+    public void InitializeTasks_DisabledProvider_DoesNotRegisterTask()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 1440, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider) { EnabledProviders = new List<IMetadata>() };
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        service.InitializeTasks();
+
+        Assert.Empty(repo.InsertedTasks);
+    }
+
+    [Fact]
+    public void InitializeTasks_DisabledProvider_RemovesPersistedTask()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 1440, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider) { EnabledProviders = new List<IMetadata>() };
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+
+        // Row left behind by an earlier version that scheduled the scan unconditionally
+        repo.AllTasks.Add(new ScheduledTask
+        {
+            Id = 5,
+            TypeName = typeof(UniqueSinglesScanCommand).FullName!,
+            Interval = 1440,
+            Priority = CommandPriority.Low
+        });
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        service.InitializeTasks();
+
+        Assert.Single(repo.DeletedTasks);
+        Assert.Empty(repo.AllTasks);
+    }
+
+    [Fact]
+    public void Handle_ProviderAdded_DisabledDefinition_DoesNotInsertTask()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 120, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider) { EnabledProviders = new List<IMetadata>() };
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        service.Handle(new ProviderAddedEvent<IMetadata>(new MetadataDefinition { Id = 1, Enable = false }));
+
+        Assert.Empty(repo.InsertedTasks);
+    }
+
+    [Fact]
+    public void Handle_ProviderUpdated_Disabled_RemovesTask()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 120, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider);
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        service.Handle(new ProviderAddedEvent<IMetadata>(new MetadataDefinition { Id = 1, Enable = true }));
+        Assert.Single(repo.AllTasks);
+
+        // User unticks Enable under Settings > Metadata
+        factory.EnabledProviders = new List<IMetadata>();
+        service.Handle(new ProviderUpdatedEvent<IMetadata>(new MetadataDefinition { Id = 1, Enable = false }));
+
+        Assert.Single(repo.DeletedTasks);
+        Assert.Empty(repo.AllTasks);
+    }
+
+    [Theory]
+    [InlineData("initialize")]
+    [InlineData("add")]
+    [InlineData("update")]
+    [InlineData("delete")]
+    public void DisabledProvider_CacheOnlyTask_IsNoLongerPending(string trigger)
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 120, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider) { EnabledProviders = new List<IMetadata>() };
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+        var taskManager = new TaskManager(repo, null!, cache, logger.Logger);
+        cache.GetCache<ScheduledTask>(typeof(TaskManager)).Set(
+            typeof(UniqueSinglesScanCommand).FullName!,
+            new ScheduledTask
+            {
+                TypeName = typeof(UniqueSinglesScanCommand).FullName!,
+                Interval = 120,
+                LastExecution = DateTime.UtcNow.AddDays(-2)
+            });
+        Assert.Single(taskManager.GetPending());
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        var definition = new MetadataDefinition { Id = 1, Enable = false };
+        switch (trigger)
+        {
+            case "initialize":
+                service.InitializeTasks();
+                break;
+            case "add":
+                service.Handle(new ProviderAddedEvent<IMetadata>(definition));
+                break;
+            case "update":
+                service.Handle(new ProviderUpdatedEvent<IMetadata>(definition));
+                break;
+            case "delete":
+                service.Handle(new ProviderDeletedEvent<IMetadata>(definition.Id));
+                break;
+        }
+
+        Assert.Empty(taskManager.GetPending());
+        Assert.Empty(repo.AllTasks);
+        Assert.Empty(repo.InsertedTasks);
+    }
+
+    // ── Restart handling ──────────────────────────────────────────────
+
+    [Fact]
+    public void InitializeTasks_AfterTaskManagerRemovedRow_KeepsCapturedLastExecution()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 1440, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider);
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+
+        var lastRun = DateTime.UtcNow.AddHours(-1);
+        repo.AllTasks.Add(new ScheduledTask
+        {
+            Id = 7,
+            TypeName = typeof(UniqueSinglesScanCommand).FullName!,
+            Interval = 1440,
+            Priority = CommandPriority.Low,
+            LastExecution = lastRun,
+            LastStartTime = lastRun
+        });
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+
+        // ApplicationStartingEvent
+        service.CaptureExistingTasks();
+
+        // TaskManager handles ApplicationStartedEvent and deletes non-built-in rows
+        repo.AllTasks.Clear();
+
+        // Plugin handles ApplicationStartedEvent last
+        service.InitializeTasks();
+
+        Assert.Single(repo.InsertedTasks);
+        Assert.Equal(lastRun, repo.InsertedTasks[0].LastExecution);
+        Assert.Equal(lastRun, repo.InsertedTasks[0].LastStartTime);
+    }
+
+    [Fact]
+    public void InitializeTasks_NoCapturedRow_IsDueImmediately()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 1440, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider);
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        service.CaptureExistingTasks();
+        service.InitializeTasks();
+
+        Assert.Single(repo.InsertedTasks);
+        Assert.True(DateTime.UtcNow - repo.InsertedTasks[0].LastExecution >= TimeSpan.FromMinutes(1440));
+    }
+
+    [Fact]
+    public void Starter_HandlesApplicationStartedAfterTaskManager()
+    {
+        var method = typeof(ScheduledTaskServiceStarter).GetMethod(
+            nameof(ScheduledTaskServiceStarter.Handle),
+            new[] { typeof(NzbDrone.Core.Lifecycle.ApplicationStartedEvent) });
+
+        var attribute = method!
+            .GetCustomAttributes(typeof(NzbDrone.Core.Messaging.EventHandleOrderAttribute), true)
+            .Cast<NzbDrone.Core.Messaging.EventHandleOrderAttribute>()
+            .SingleOrDefault();
+
+        Assert.NotNull(attribute);
+        Assert.Equal(NzbDrone.Core.Messaging.EventHandleOrder.Last, attribute!.EventHandleOrder);
+    }
+
+    [Fact]
+    public void HostLifecycle_RealContainerAndEvents_PreservesSchedule()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 1440, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider);
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+        var lastRun = DateTime.UtcNow.AddHours(-1);
+        var lastStart = lastRun.AddMinutes(-3);
+        var typeName = typeof(UniqueSinglesScanCommand).FullName!;
+        repo.AllTasks.Add(new ScheduledTask
+        {
+            Id = 7, TypeName = typeName, Interval = 1440,
+            LastExecution = lastRun, LastStartTime = lastStart
+        });
+
+        using var container = new Container(rules => rules.WithNzbDroneRules());
+        // Same reuse rules as Lidarr's AutoAddServices, restricted to these three
+        // implementations so the test cannot start unrelated host services.
+        var types = new[] { typeof(ScheduledTaskServiceStarter), typeof(ScheduledTaskService), typeof(TaskManager) };
+        container.RegisterMany(types, serviceTypeCondition: t => t.IsInterface && !t.FullName!.StartsWith("System"), reuse: Reuse.Singleton);
+        container.RegisterMany(types, serviceTypeCondition: t => !t.IsInterface && !t.FullName!.StartsWith("System"), reuse: Reuse.Transient);
+        container.RegisterInstance<IMetadataFactory>(factory);
+        container.RegisterInstance<IScheduledTaskRepository>(repo);
+        container.RegisterInstance<ICacheManager>(cache);
+        container.RegisterInstance<NzbDrone.Core.Configuration.IConfigService>(
+            DispatchProxy.Create<NzbDrone.Core.Configuration.IConfigService, ScheduleConfigProxy>());
+        container.RegisterInstance(logger.Logger);
+        var services = new NzbDrone.Common.ServiceFactory(container.GetServiceProvider());
+        var starting = services.BuildAll<IHandle<NzbDrone.Core.Lifecycle.ApplicationStartingEvent>>()
+            .OfType<ScheduledTaskServiceStarter>().Single();
+        var started = services.BuildAll<IHandle<NzbDrone.Core.Lifecycle.ApplicationStartedEvent>>()
+            .OfType<ScheduledTaskServiceStarter>().Single();
+        Assert.Same(starting, started);
+        var events = new EventAggregator(logger.Logger, services);
+
+        events.PublishEvent(new NzbDrone.Core.Lifecycle.ApplicationStartingEvent());
+        events.PublishEvent(new NzbDrone.Core.Lifecycle.ApplicationStartedEvent());
+
+        var taskManager = services.BuildAll<NzbDrone.Core.Jobs.ITaskManager>().Single();
+        Assert.DoesNotContain(taskManager.GetPending(), t => t.TypeName == typeName);
+        // Verify completion updates the restored row and the shared cache.
+        Assert.Contains(repo.DeletedTasks, t => t.Id == 7 && t.TypeName == typeName);
+        var restored = Assert.Single(repo.AllTasks, t => t.TypeName == typeName);
+        Assert.Contains(restored, repo.InsertedTasks);
+        Assert.NotEqual(7, restored.Id);
+        Assert.Equal(lastRun, restored.LastExecution);
+        Assert.Equal(lastStart, restored.LastStartTime);
+        Assert.Same(restored, Assert.Single(taskManager.GetAll(), t => t.TypeName == typeName));
+        var commandStart = DateTime.UtcNow.AddSeconds(-1);
+        events.PublishEvent(new CommandExecutedEvent(new CommandModel
+        {
+            Body = new UniqueSinglesScanCommand(), StartedAt = commandStart
+        }));
+        Assert.True(restored.LastExecution > lastRun);
+        Assert.Equal(commandStart, restored.LastStartTime);
+        Assert.DoesNotContain(taskManager.GetPending(), t => t.TypeName == typeName);
+
+    }
+
+    public class ScheduleConfigProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            return method!.Name switch
+            {
+                "get_BackupInterval" => 1,
+                "get_RssSyncInterval" => 60,
+                _ => throw new NotSupportedException(method.Name)
+            };
+        }
     }
 
     // ── Stub implementations ──────────────────────────────────────────
@@ -307,6 +589,11 @@ public class ScheduledTaskServiceTests
     {
         public List<IMetadata> Providers;
 
+        /// <summary>
+        /// Providers reported as enabled. When null, every provider is treated as enabled.
+        /// </summary>
+        public List<IMetadata>? EnabledProviders;
+
         public StubMetadataFactory(params IMetadata[] providers)
         {
             Providers = providers.ToList();
@@ -331,7 +618,7 @@ public class ScheduledTaskServiceTests
         public FluentValidation.Results.ValidationResult Test(MetadataDefinition definition) => new();
         public object RequestAction(MetadataDefinition definition, string action, IDictionary<string, string> query) => new();
         public List<MetadataDefinition> AllForTag(int tagId) => new();
-        public List<IMetadata> Enabled() => Providers;
+        public List<IMetadata> Enabled() => EnabledProviders ?? Providers;
     }
 
     private sealed class StubScheduledTaskRepository : IScheduledTaskRepository
@@ -369,7 +656,7 @@ public class ScheduledTaskServiceTests
         public int Count() => AllTasks.Count;
         public ScheduledTask Find(int id) => AllTasks.FirstOrDefault(t => t.Id == id)!;
         public ScheduledTask Get(int id) => AllTasks.First(t => t.Id == id);
-        public ScheduledTask Upsert(ScheduledTask model) => model;
+        public ScheduledTask Upsert(ScheduledTask model) => AllTasks.Contains(model) ? Update(model) : Insert(model);
         public void SetFields(ScheduledTask model, params System.Linq.Expressions.Expression<Func<ScheduledTask, object>>[] properties) { }
         public void Delete(int id) { var t = Find(id); if (t != null) Delete(t); }
         public IEnumerable<ScheduledTask> Get(IEnumerable<int> ids) => AllTasks.Where(t => ids.Contains(t.Id));
@@ -380,7 +667,12 @@ public class ScheduledTaskServiceTests
         public void DeleteMany(IEnumerable<int> ids) { }
         public void Purge(bool vacuum = false) { }
         public bool HasItems() => AllTasks.Count > 0;
-        public void SetLastExecutionTime(int id, DateTime executionTime, DateTime startTime) { }
+        public void SetLastExecutionTime(int id, DateTime executionTime, DateTime startTime)
+        {
+            var task = Get(id);
+            task.LastExecution = executionTime;
+            task.LastStartTime = startTime;
+        }
         public ScheduledTask Single() => AllTasks.Single();
         public ScheduledTask SingleOrDefault() => AllTasks.SingleOrDefault();
         public PagingSpec<ScheduledTask> GetPaged(PagingSpec<ScheduledTask> pagingSpec) => pagingSpec;
