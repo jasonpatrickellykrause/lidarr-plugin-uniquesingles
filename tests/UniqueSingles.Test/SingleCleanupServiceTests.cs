@@ -899,6 +899,13 @@ public class SingleCleanupServiceTests
 
         public List<Album> GetCandidates(int artistMetadataId, string title) => NotUsed<List<Album>>();
 
+        // added to IAlbumService in Lidarr 3.2.1
+        public Album FindByTitleAndYear(int artistMetadataId, string title, int? year) => NotUsed<Album>();
+
+        public Album FindByTitleAndYearInexact(int artistMetadataId, string title, int? year) => NotUsed<Album>();
+
+        public List<Album> GetCandidates(int artistMetadataId, string title, int? year) => NotUsed<List<Album>>();
+
         public void DeleteAlbum(int albumId, bool deleteFiles, bool addImportListExclusion = false) => NotUsed();
 
         public List<Album> GetAllAlbums() => _albums.ToList();

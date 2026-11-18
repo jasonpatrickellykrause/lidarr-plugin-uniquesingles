@@ -12,6 +12,7 @@ This release is published from the fork at jasonpatrickellykrause/lidarr-plugin-
 - Issue and pull request templates
 - Dependabot config for NuGet and GitHub Actions dependencies
 - CodeQL security scanning workflow
+- A `net10.0` build for Lidarr 4.x. Each release has `Lidarr.Plugin.UniqueSingles.net8.0.zip` for Lidarr 3.x and `Lidarr.Plugin.UniqueSingles.net10.0.zip` for Lidarr 4.x; Lidarr installs the one for its own .NET version.
 
 ### Changed
 
