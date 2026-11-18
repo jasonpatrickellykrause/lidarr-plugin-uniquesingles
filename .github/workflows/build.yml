@@ -17,11 +17,24 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: true
   PLUGIN_NAME: Lidarr.Plugin.UniqueSingles
   PLUGIN_VERSION: 1.1.0.${{ github.run_number }}
-  DOTNET_VERSION: 8.0.405
-  LIDARR_VERSION: 3.1.3.4968
 
 jobs:
   build:
+    # Lidarr installs the release asset named for its own .NET version (….net8.0.zip on Lidarr 3.x, ….net10.0.zip on
+    # Lidarr 4.x), so every release carries both. Each build compiles against the matching Lidarr source.
+    strategy:
+      matrix:
+        include:
+          - framework: net8.0
+            dotnet: 8.0.405
+            # empty: use the ext/Lidarr submodule as committed (3.x)
+            lidarr_ref: ''
+            lidarr_version: 3.1.3.4968
+          - framework: net10.0
+            dotnet: 10.0.404
+            # Lidarr 4.0.0.5222 on develop (no tag for nightlies); the first .NET 10 build is abd3d101f
+            lidarr_ref: ddf8080fac613433354d4ee6a36a768148f7099e
+            lidarr_version: 4.0.0.5222
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,37 +43,65 @@ jobs:
           submodules: true
           fetch-depth: 0
 
+      - name: Check out Lidarr ${{ matrix.lidarr_ref }}
+        if: matrix.lidarr_ref != ''
+        run: |
+          git -C ext/Lidarr fetch --depth 1 origin ${{ matrix.lidarr_ref }}
+          git -C ext/Lidarr checkout FETCH_HEAD
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+          dotnet-version: ${{ matrix.dotnet }}
 
       - name: Pin Lidarr assembly version
         run: |
           props=ext/Lidarr/src/Directory.Build.props
-          sed -i -E "s#<AssemblyVersion>[0-9.*]+</AssemblyVersion>#<AssemblyVersion>${LIDARR_VERSION}</AssemblyVersion>#" "$props"
-          grep "<AssemblyVersion>${LIDARR_VERSION}</AssemblyVersion>" "$props"
+          sed -i -E "s#<AssemblyVersion>[0-9.*]+</AssemblyVersion>#<AssemblyVersion>${{ matrix.lidarr_version }}</AssemblyVersion>#" "$props"
+          grep "<AssemblyVersion>${{ matrix.lidarr_version }}</AssemblyVersion>" "$props"
 
       - name: Build
+        # PluginTargetFramework, not -f/TargetFramework: NuGet restore ignores a global TargetFramework.
+        # LidarrAssemblyVersion tells AssemblySmokeTests which Lidarr version to expect.
         run: |
-          dotnet restore UniqueSingles.sln /p:WarningsNotAsErrors="NU1902%3BNU1903"
-          dotnet build UniqueSingles.sln -c Release /p:WarningsNotAsErrors="NU1902%3BNU1903" /p:PluginVersion=${PLUGIN_VERSION}
+          props="/p:PluginTargetFramework=${{ matrix.framework }} /p:LidarrAssemblyVersion=${{ matrix.lidarr_version }}"
+          dotnet restore UniqueSingles.sln /p:WarningsNotAsErrors="NU1902%3BNU1903" $props
+          dotnet build UniqueSingles.sln -c Release /p:WarningsNotAsErrors="NU1902%3BNU1903" /p:PluginVersion=${PLUGIN_VERSION} $props
 
       - name: Test
         run: |
-          dotnet test tests/UniqueSingles.Test/UniqueSingles.Test.csproj -c Release --no-build --verbosity normal
+          dotnet test tests/UniqueSingles.Test/UniqueSingles.Test.csproj -c Release --no-build --verbosity normal /p:PluginTargetFramework=${{ matrix.framework }}
 
       - name: Zip Plugin
-        if: github.ref == 'refs/heads/main'
         run: |
-          cd _temp/bin/Release/UniqueSingles
-          zip /tmp/${{ env.PLUGIN_NAME }}.net8.0.zip Lidarr.Plugin.UniqueSingles.dll Lidarr.Plugin.UniqueSingles.pdb
+          cd _temp/bin/Release/${{ matrix.framework }}/UniqueSingles
+          zip /tmp/${{ env.PLUGIN_NAME }}.${{ matrix.framework }}.zip Lidarr.Plugin.UniqueSingles.dll Lidarr.Plugin.UniqueSingles.pdb
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PLUGIN_NAME }}.${{ matrix.framework }}
+          path: /tmp/${{ env.PLUGIN_NAME }}.${{ matrix.framework }}.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ env.PLUGIN_NAME }}.*
+          merge-multiple: true
+          path: dist
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v3
-        if: github.ref == 'refs/heads/main'
         with:
           tag_name: ${{ env.PLUGIN_VERSION }}
           name: ${{ env.PLUGIN_VERSION }}
           draft: true
-          files: /tmp/${{ env.PLUGIN_NAME }}.net8.0.zip
+          files: |
+            dist/${{ env.PLUGIN_NAME }}.net8.0.zip
+            dist/${{ env.PLUGIN_NAME }}.net10.0.zip
