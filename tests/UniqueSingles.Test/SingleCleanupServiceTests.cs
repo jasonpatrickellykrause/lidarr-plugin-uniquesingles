@@ -8,7 +8,7 @@ using Xunit;
 
 namespace UniqueSingles.Test;
 
-public class SingleCleanupServiceTests
+public partial class SingleCleanupServiceTests
 {
     [Theory]
     [InlineData("Album")]
@@ -165,7 +165,10 @@ public class SingleCleanupServiceTests
 
         Assert.Equal(1, result.CandidatesChecked);
         Assert.Equal(0, result.Cleaned);
-        Assert.Equal(1, result.Skipped);
+        // With no other comparison releases the track is unmatched, which logs a keep-exclusive
+        // outcome; the summary counter now reports that same aggregate instead of skipped.
+        Assert.Equal(0, result.Skipped);
+        Assert.Equal(1, result.KeepExclusive);
         Assert.Empty(albumService.SetMonitoredCalls);
         Assert.Empty(deleteMediaFiles.DeletedFiles);
     }
@@ -297,7 +300,8 @@ public class SingleCleanupServiceTests
         var albumService = new RecordingAlbumService(comparisonAlbum, importedSingle);
         var trackService = new RecordingTrackService()
             .WithTracks(comparisonAlbum.Id, Track("Song", 180000, "album-mbid", fileId: 11))
-            .WithTracks(importedSingle.Id, Track("Song", 180000, "single-mbid", fileId: 0));
+            // Exclusive track: a Tier-1/Tier-2 match would now be unmonitored (see the Tier-2 no-files tests).
+            .WithTracks(importedSingle.Id, Track("Exclusive Song", 180000, "single-mbid", fileId: 0));
         var mediaFileService = new RecordingMediaFileService();
         var deleteMediaFiles = new RecordingDeleteMediaFiles();
         var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles, logger);
@@ -483,7 +487,8 @@ public class SingleCleanupServiceTests
 
         Assert.Equal(2, result.CandidatesChecked); // 2 singles checked
         Assert.Equal(1, result.Cleaned); // 1 redundant single cleaned
-        Assert.Equal(1, result.Skipped); // 1 unmatched single skipped
+        Assert.Equal(0, result.Skipped); // exclusive keep is its own aggregate, not skipped
+        Assert.Equal(1, result.KeepExclusive); // 1 unmatched single kept for exclusive content
         Assert.Equal(0, result.ReviewNeeded);
         Assert.Equal(0, result.UnmonitorFailures);
         Assert.Equal(0, result.DeleteFailures);
@@ -546,8 +551,13 @@ public class SingleCleanupServiceTests
         Assert.Equal(1, result.ReviewNeeded);
         Assert.Empty(deleteMediaFiles.DeletedFiles);
 
-        Assert.Contains(logger.InfoMessages, m => m.Contains("review-needed", StringComparison.Ordinal) && m.Contains("track='Song'", StringComparison.Ordinal));
-        Assert.Contains(logger.DebugMessages, m => m.Contains("cleanup-skipped", StringComparison.Ordinal) && m.Contains("track='Exclusive'", StringComparison.Ordinal) && m.Contains("matchTier=NoMatch", StringComparison.Ordinal));
+        // Review requests keep their release outcome and per-track evidence at Info.
+        Assert.Contains(logger.InfoMessages, m => m.Contains("outcome=unresolved-review", StringComparison.Ordinal) && m.Contains("singleId=200", StringComparison.Ordinal));
+        Assert.Contains(logger.InfoMessages, m => m.Contains("track-evidence", StringComparison.Ordinal) && m.Contains("track='Song'", StringComparison.Ordinal));
+        // An exclusive keep logs its outcome at Info, but its per-track evidence is routine.
+        Assert.Contains(logger.InfoMessages, m => m.Contains("outcome=keep-exclusive", StringComparison.Ordinal) && m.Contains("singleId=201", StringComparison.Ordinal));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("track-evidence", StringComparison.Ordinal) && m.Contains("track='Exclusive'", StringComparison.Ordinal) && m.Contains("matchTier=NoMatch", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("track='Exclusive'", StringComparison.Ordinal));
         Assert.Contains(logger.DebugMessages, m => m.Contains("single already unmonitored", StringComparison.Ordinal));
         Assert.Contains(logger.DebugMessages, m => m.Contains("UniqueSingles scan start", StringComparison.Ordinal));
         Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("cleanup-skipped", StringComparison.Ordinal));
@@ -740,7 +750,10 @@ public class SingleCleanupServiceTests
 
         Assert.Equal(1, result.CandidatesChecked);
         Assert.Equal(0, result.Cleaned);
-        Assert.Equal(1, result.Skipped);
+        // The exclusive track keeps the release; this is a keep-exclusive outcome (its own
+        // aggregate) rather than a plain skip, reconciling with the outcome= lines.
+        Assert.Equal(0, result.Skipped);
+        Assert.Equal(1, result.KeepExclusive);
         Assert.True(single.Monitored);
         Assert.Empty(deleteMediaFiles.DeletedFiles);
     }
@@ -807,15 +820,164 @@ public class SingleCleanupServiceTests
         Assert.Contains(logger.InfoMessages, m => m.Contains("review-needed", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void Cleanup_ExclusiveContentTakesPrecedenceOverTitleOnlyReview(bool viaImport, bool duplicateAside)
+    {
+        using var audio = new SyntheticAudioFiles();
+        var sourcePath = audio.Create("source.wav");
+        var candidatePath = audio.Create("candidate.wav");
+        var artist = Artist();
+        var album = Album(100, "Retained album", "Album");
+        var single = Album(200, "A-side and exclusive B-side", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("A-side", 220000, "album-a", 11))
+            .WithTracks(single.Id,
+                Track("A-side", duplicateAside ? 220000 : 180000, "single-a", 21),
+                Track("Exclusive B-side", 190000, "single-b", 22));
+        using var logger = new RecordingLogger();
+        var media = new RecordingMediaFileService()
+            .WithFiles(album.Id, File(11, album.Id, sourcePath))
+            .WithFiles(single.Id, File(21, single.Id, candidatePath));
+        var deletes = new RecordingDeleteMediaFiles { DeleteSyntheticFiles = true };
+        var service = Service(albumService, trackService, media, deletes, logger);
+        var options = new SingleCleanupOptions(3000, new HashSet<string> { "Album" }, Tier3Action.FlagOnly);
+
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, album, options)
+            : service.ScanArtistWithOptions(artist, options);
+
+        Assert.Equal(1, result.CandidatesChecked);
+        Assert.Equal(0, result.Skipped); // exclusive keep is its own aggregate, not skipped
+        Assert.Equal(1, result.KeepExclusive);
+        Assert.Equal(0, result.ReviewNeeded);
+        Assert.Equal(0, result.Cleaned);
+        Assert.True(single.Monitored);
+        Assert.True(album.Monitored);
+        Assert.True(System.IO.File.Exists(sourcePath));
+        Assert.True(System.IO.File.Exists(candidatePath));
+        Assert.Empty(albumService.SetMonitoredCalls);
+        Assert.Empty(deletes.DeletedFiles);
+        Assert.Contains(logger.InfoMessages, m => m.Contains("keep-exclusive") && m.Contains("singleId=200"));
+        Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("review-needed"));
+        // Fork: per-track evidence for a kept release is routine, so it logs at Debug.
+        Assert.Contains(logger.DebugMessages, m => m.Contains(duplicateAside ? "Tier2_TitleDuration" : "Tier3_TitleOnly") && m.Contains("A-side"));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("Exclusive B-side") && m.Contains("NoMatch"));
+        Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("track-evidence"));
+    }
+
+    [Theory]
+    [InlineData(false, 1, false)]
+    [InlineData(true, 1, false)]
+    [InlineData(false, 2, false)]
+    [InlineData(true, 2, false)]
+    [InlineData(false, 2, true)]
+    [InlineData(true, 2, true)]
+    public void Cleanup_FinalReleaseOutcomeAgreesWithCountsAndRetainsSource(bool viaImport, int trackCount, bool redundant)
+    {
+        using var audio = new SyntheticAudioFiles();
+        var artist = Artist();
+        var album = Album(100, "Retained album", "Album");
+        var single = Album(200, "Candidate", "Single");
+        var albums = new RecordingAlbumService(album, single);
+        var tracks = new RecordingTrackService();
+        var sourceTracks = new List<Track>();
+        var candidateTracks = new List<Track>();
+        var media = new RecordingMediaFileService();
+        var sourceFiles = new List<TrackFile>();
+        var candidateFiles = new List<TrackFile>();
+        for (var i = 0; i < trackCount; i++)
+        {
+            var source = Track($"Song {i}", 220000, $"source-{i}", 11 + i);
+            source.Id = 101 + i;
+            source.AlbumId = album.Id;
+            sourceTracks.Add(source);
+            var candidate = Track($"Song {i}", redundant ? 220000 : 180000, $"candidate-{i}", 21 + i);
+            candidate.Id = 201 + i;
+            candidate.AlbumId = single.Id;
+            candidateTracks.Add(candidate);
+            sourceFiles.Add(File(source.TrackFileId, album.Id, audio.Create($"source-{i}.wav")));
+            candidateFiles.Add(File(candidate.TrackFileId, single.Id, audio.Create($"candidate-{i}.wav")));
+        }
+
+        tracks.WithTracks(album.Id, sourceTracks.ToArray()).WithTracks(single.Id, candidateTracks.ToArray());
+        media.WithFiles(album.Id, sourceFiles.ToArray()).WithFiles(single.Id, candidateFiles.ToArray());
+        var deletes = new RecordingDeleteMediaFiles { DeleteSyntheticFiles = true };
+        using var logger = new RecordingLogger();
+        var service = Service(albums, tracks, media, deletes, logger);
+        var options = new SingleCleanupOptions(3000, new HashSet<string> { "Album" }, Tier3Action.FlagOnly);
+
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, album, options)
+            : service.ScanArtistWithOptions(artist, options);
+
+        Assert.Equal(1, result.CandidatesChecked);
+        Assert.Equal(redundant ? 1 : 0, result.Cleaned);
+        Assert.Equal(redundant ? 0 : 1, result.Skipped);
+        Assert.Equal(redundant ? 0 : 1, result.ReviewNeeded);
+        Assert.Equal(!redundant, single.Monitored);
+        Assert.True(album.Monitored);
+        Assert.All(sourceFiles, f => Assert.True(System.IO.File.Exists(f.Path)));
+        Assert.All(candidateFiles, f => Assert.Equal(!redundant, System.IO.File.Exists(f.Path)));
+        Assert.Equal(redundant ? trackCount : 0, deletes.DeletedFiles.Count);
+        Assert.Equal(redundant ? 0 : 1, logger.InfoMessages.Count(m => m.Contains("review-needed")));
+        Assert.Contains(logger.InfoMessages, m => m.Contains(redundant ? "cleanup-approved" : "outcome=unresolved-review") && m.Contains("singleId=200"));
+        Assert.True(logger.InfoMessages.Any(m => m.Contains("trackId=201") && m.Contains("matchedAlbumId=100") && m.Contains("matchedTrackId=101")), string.Join("\n", logger.InfoMessages));
+    }
+
+    private sealed class SyntheticAudioFiles : IDisposable
+    {
+        private readonly string _directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "uniquesingles-" + Guid.NewGuid().ToString("N"));
+
+        public string Create(string name)
+        {
+            System.IO.Directory.CreateDirectory(_directory);
+            var path = System.IO.Path.Combine(_directory, name);
+            using var writer = new System.IO.BinaryWriter(System.IO.File.Create(path));
+            // Valid mono 16-bit PCM WAVE: 80 synthetic samples at 8 kHz.
+            writer.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
+            writer.Write(196);
+            writer.Write(System.Text.Encoding.ASCII.GetBytes("WAVEfmt "));
+            writer.Write(16);
+            writer.Write((short)1);
+            writer.Write((short)1);
+            writer.Write(8000);
+            writer.Write(16000);
+            writer.Write((short)2);
+            writer.Write((short)16);
+            writer.Write(System.Text.Encoding.ASCII.GetBytes("data"));
+            writer.Write(160);
+            for (var i = 0; i < 80; i++)
+            {
+                writer.Write((short)(i % 8 * 100));
+            }
+
+            return path;
+        }
+
+        public void Dispose() => System.IO.Directory.Delete(_directory, true);
+    }
+
     private static SingleCleanupService Service(
         RecordingAlbumService albumService,
         RecordingTrackService trackService,
         RecordingMediaFileService mediaFileService,
         RecordingDeleteMediaFiles deleteMediaFiles,
-        RecordingLogger? logger = null)
+        RecordingLogger? logger = null,
+        RecordingHistoryRecorder? historyRecorder = null)
     {
         var loggerHarness = logger ?? new RecordingLogger();
-        return new SingleCleanupService(albumService, trackService, mediaFileService, deleteMediaFiles, loggerHarness.Logger);
+        return new SingleCleanupService(
+            albumService,
+            trackService,
+            mediaFileService,
+            deleteMediaFiles,
+            historyRecorder ?? new RecordingHistoryRecorder(),
+            loggerHarness.Logger);
     }
 
     private static Artist Artist() => new() { Id = 42, Name = "Test Artist" };
@@ -858,6 +1020,8 @@ public class SingleCleanupServiceTests
             _albums = albums.ToList();
         }
 
+        public Action? BeforeArtistLookup { get; set; }
+        public Action? AfterUnmonitor { get; set; }
         public bool ThrowOnSetAlbumMonitored { get; set; }
         public List<int> ArtistAlbumLookupIds { get; } = new();
         public List<int> AllLibraryLookupCalls { get; } = new();
@@ -877,6 +1041,7 @@ public class SingleCleanupServiceTests
 
         public List<Album> GetAlbumsByArtist(int artistId)
         {
+            BeforeArtistLookup?.Invoke();
             ArtistAlbumLookupIds.Add(artistId);
             return _albums;
         }
@@ -919,6 +1084,7 @@ public class SingleCleanupServiceTests
             {
                 throw new InvalidOperationException("unmonitor failed");
             }
+            AfterUnmonitor?.Invoke();
         }
 
         public void SetMonitored(IEnumerable<int> ids, bool monitored)
@@ -1109,18 +1275,48 @@ public class SingleCleanupServiceTests
     private sealed class RecordingDeleteMediaFiles : IDeleteMediaFiles
     {
         public bool ThrowOnDelete { get; set; }
+        public bool DeleteSyntheticFiles { get; set; }
+
+        /// <summary>
+        /// Runs inside the destructive delete call, after the final revalidation check but before
+        /// the file is removed — the exact externally-mutable window the delete guard must close.
+        /// </summary>
+        public Action<TrackFile>? BeforeDelete { get; set; }
+
         public List<(Artist Artist, TrackFile TrackFile)> DeletedFiles { get; } = new();
 
         public void DeleteTrackFile(Artist artist, TrackFile trackFile)
         {
+            BeforeDelete?.Invoke(trackFile);
             DeletedFiles.Add((artist, trackFile));
             if (ThrowOnDelete)
             {
                 throw new InvalidOperationException("delete failed");
             }
+
+            if (DeleteSyntheticFiles)
+            {
+                System.IO.File.Delete(trackFile.Path);
+            }
         }
 
         public void DeleteTrackFile(TrackFile trackFile, string subfolder = "") => NotUsed();
+    }
+
+    internal sealed class RecordingHistoryRecorder : ICleanupHistoryRecorder
+    {
+        public bool ThrowOnRecord { get; set; }
+        public List<(int ArtistId, int AlbumId, string Reason)> Unmonitors { get; } = new();
+
+        public void RecordUnmonitor(Artist artist, Album single, string reason)
+        {
+            if (ThrowOnRecord)
+            {
+                throw new InvalidOperationException("history insert failed");
+            }
+
+            Unmonitors.Add((artist.Id, single.Id, reason ?? string.Empty));
+        }
     }
 
     private sealed class RecordingLogger : IDisposable
@@ -1316,6 +1512,141 @@ public class SingleCleanupServiceTests
         Assert.DoesNotContain((uniqueSingle.Id, false), albumService.SetMonitoredCalls);
     }
 
+    // ============================================================
+    // Tier-2 unmonitor for file-less singles in scan/import (same rule as the eager path)
+    // ============================================================
+
+    private static SingleCleanupOptions AlbumOptions(bool eager = true) =>
+        new(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album" }, Tier3Action.FlagOnly,
+            eagerUnmonitorRedundantSingles: eager);
+
+    [Fact]
+    public void ScanArtistWithOptions_Tier2RedundantNoFiles_UnmonitorsWithoutDeleting()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var single = Album(200, "Pre-existing Single", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+
+        // Different recording MBIDs (e.g. a different mastering), same title, 1.5 s apart.
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("Song", 180000, "album-recording", fileId: 11))
+            .WithTracks(single.Id, Track("Song", 181500, "single-recording", fileId: 0));
+
+        var mediaFileService = new RecordingMediaFileService();
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
+
+        var result = service.ScanArtistWithOptions(artist, AlbumOptions());
+
+        Assert.Equal(1, result.CandidatesChecked);
+        Assert.Equal(1, result.Cleaned);
+        Assert.Equal(0, result.Skipped);
+        Assert.Contains((single.Id, false), albumService.SetMonitoredCalls);
+        Assert.Empty(deleteMediaFiles.DeletedFiles);
+    }
+
+    [Fact]
+    public void ScanArtistWithOptions_Tier2RedundantNoFiles_EagerSettingOff_Skips()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var single = Album(200, "Pre-existing Single", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("Song", 180000, "album-recording", fileId: 11))
+            .WithTracks(single.Id, Track("Song", 181500, "single-recording", fileId: 0));
+        var service = Service(albumService, trackService, new RecordingMediaFileService(), new RecordingDeleteMediaFiles());
+
+        var result = service.ScanArtistWithOptions(artist, AlbumOptions(eager: false));
+
+        Assert.Equal(0, result.Cleaned);
+        Assert.Equal(1, result.Skipped);
+        Assert.Empty(albumService.SetMonitoredCalls);
+    }
+
+    [Fact]
+    public void ScanArtistWithOptions_TitleOnlyMatchNoFiles_NeverUnmonitors()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var single = Album(200, "Radio Edit", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+
+        // Same title but 40 s shorter: Tier 3 (title-only), which must never unmonitor.
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("Song", 220000, "album-recording", fileId: 11))
+            .WithTracks(single.Id, Track("Song", 180000, "single-recording", fileId: 0));
+        var service = Service(albumService, trackService, new RecordingMediaFileService(), new RecordingDeleteMediaFiles());
+
+        var result = service.ScanArtistWithOptions(artist, AlbumOptions());
+
+        Assert.Equal(0, result.Cleaned);
+        Assert.Equal(1, result.Skipped);
+        Assert.Empty(albumService.SetMonitoredCalls);
+    }
+
+    [Fact]
+    public void ScanArtistWithOptions_Tier2PlusExclusiveTrackNoFiles_KeepsSingle()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var single = Album(200, "A-side + B-side", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("A-side", 180000, "album-recording", fileId: 11))
+            .WithTracks(single.Id,
+                Track("A-side", 181000, "single-recording", fileId: 0),
+                Track("B-side", 150000, "b-side-recording", fileId: 0));
+        var service = Service(albumService, trackService, new RecordingMediaFileService(), new RecordingDeleteMediaFiles());
+
+        var result = service.ScanArtistWithOptions(artist, AlbumOptions());
+
+        Assert.Equal(0, result.Cleaned);
+        Assert.Empty(albumService.SetMonitoredCalls);
+    }
+
+    [Fact]
+    public void ScanArtistWithOptions_Tier2MatchAgainstUndownloadedAlbumNoFiles_KeepsSingle()
+    {
+        var artist = Artist();
+        var album = Album(100, "Missing Album", "Album");
+        var single = Album(200, "Single", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+
+        // The album is monitored but not downloaded yet: the single may be the only way to get
+        // the song, so it stays wanted (only downloaded tracks are comparison sources).
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("Song", 180000, "album-recording", fileId: 0))
+            .WithTracks(single.Id, Track("Song", 181000, "single-recording", fileId: 0));
+        var service = Service(albumService, trackService, new RecordingMediaFileService(), new RecordingDeleteMediaFiles());
+
+        var result = service.ScanArtistWithOptions(artist, AlbumOptions());
+
+        Assert.Equal(0, result.Cleaned);
+        Assert.Empty(albumService.SetMonitoredCalls);
+    }
+
+    [Fact]
+    public void CleanupWithOptions_AlbumImport_Tier2RedundantNoFilesSingle_Unmonitors()
+    {
+        var artist = Artist();
+        var importedAlbum = Album(100, "Just Imported", "Album");
+        var single = Album(200, "Single From Before", "Single");
+        var albumService = new RecordingAlbumService(importedAlbum, single);
+        var trackService = new RecordingTrackService()
+            .WithTracks(importedAlbum.Id, Track("Song", 180000, "album-recording", fileId: 11))
+            .WithTracks(single.Id, Track("Song", 179000, "single-recording", fileId: 0));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var service = Service(albumService, trackService, new RecordingMediaFileService(), deleteMediaFiles);
+
+        var result = service.CleanupWithOptions(artist, importedAlbum, AlbumOptions());
+
+        Assert.Equal(1, result.Cleaned);
+        Assert.Contains((single.Id, false), albumService.SetMonitoredCalls);
+        Assert.Empty(deleteMediaFiles.DeletedFiles);
+    }
+
     [Fact]
     public void LegacyCleanupSinglesForArtist_Tier1RedundantNoFiles_UnmonitorsOnly()
     {
@@ -1343,12 +1674,15 @@ public class SingleCleanupServiceTests
     // "Single" as a comparison type
     // ============================================================
 
-    [Fact]
-    public void ScanArtistWithOptions_SingleComparisonType_DoesNotMatchSingleAgainstItself()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cleanup_SingleComparisonType_DoesNotMatchSingleAgainstItself(bool viaImport)
     {
         var artist = Artist();
         var single = Album(200, "Only Single", "Single");
-        var albumService = new RecordingAlbumService(single);
+        var imported = Album(100, "Imported Album", "Album");
+        var albumService = viaImport ? new RecordingAlbumService(imported, single) : new RecordingAlbumService(single);
 
         var trackService = new RecordingTrackService()
             .WithTracks(single.Id, Track("Song", 180000, "single-mbid", fileId: 21));
@@ -1359,7 +1693,9 @@ public class SingleCleanupServiceTests
         var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
         var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album", "EP", "Single" }, Tier3Action.FlagOnly);
 
-        var result = service.ScanArtistWithOptions(artist, options);
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, imported, options)
+            : service.ScanArtistWithOptions(artist, options);
 
         Assert.Equal(1, result.CandidatesChecked);
         Assert.Equal(0, result.Cleaned);
@@ -1367,13 +1703,16 @@ public class SingleCleanupServiceTests
         Assert.Empty(deleteMediaFiles.DeletedFiles);
     }
 
-    [Fact]
-    public void ScanArtistWithOptions_SingleComparisonType_KeepsOneOfTwoIdenticalSingles()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cleanup_SingleComparisonType_KeepsOneOfTwoIdenticalSingles(bool viaImport)
     {
         var artist = Artist();
         var first = Album(200, "Song", "Single");
         var second = Album(300, "Song", "Single");
-        var albumService = new RecordingAlbumService(first, second);
+        var imported = Album(100, "Imported Album", "Album");
+        var albumService = viaImport ? new RecordingAlbumService(imported, first, second) : new RecordingAlbumService(first, second);
 
         var trackService = new RecordingTrackService()
             .WithTracks(first.Id, Track("Song", 180000, "shared-mbid", fileId: 21))
@@ -1386,31 +1725,73 @@ public class SingleCleanupServiceTests
         var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
         var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album", "EP", "Single" }, Tier3Action.FlagOnly);
 
-        var result = service.ScanArtistWithOptions(artist, options);
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, imported, options)
+            : service.ScanArtistWithOptions(artist, options);
 
         Assert.Equal(2, result.CandidatesChecked);
         Assert.Equal(1, result.Cleaned);
-        Assert.Equal(1, result.Skipped);
+        Assert.Equal(0, result.Skipped); // the kept twin now reports keepExclusive, not skipped
+        Assert.Equal(1, result.KeepExclusive);
         Assert.Single(albumService.SetMonitoredCalls);
         Assert.Single(deleteMediaFiles.DeletedFiles);
+    }
+
+    [Fact]
+    public void ScanArtistWithOptions_NoFiles_CanUseConfiguredSingleAsTier1Source()
+    {
+        var artist = Artist();
+        var candidate = Album(200, "Not Downloaded", "Single");
+        var downloaded = Album(300, "Downloaded Single", "Single");
+        var albumService = new RecordingAlbumService(candidate, downloaded);
+        var trackService = new RecordingTrackService()
+            .WithTracks(candidate.Id, Track("Song", 180000, "shared-mbid", fileId: 0))
+            .WithTracks(downloaded.Id, Track("Song", 180000, "shared-mbid", fileId: 31));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var service = Service(albumService, trackService, new RecordingMediaFileService(), deleteMediaFiles);
+        var options = new SingleCleanupOptions(3000,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Single" }, Tier3Action.FlagOnly);
+
+        var result = service.ScanArtistWithOptions(artist, options);
+
+        Assert.Equal(1, result.Cleaned);
+        Assert.Contains((candidate.Id, false), albumService.SetMonitoredCalls);
+        Assert.True(downloaded.Monitored);
+        Assert.Empty(deleteMediaFiles.DeletedFiles);
     }
 
     // ============================================================
     // Secondary album types
     // ============================================================
 
-    [Fact]
-    public void ScanArtistWithOptions_LiveAlbumTitleDurationMatch_DoesNotCleanSingle()
+    [Theory]
+    [InlineData("Live", false, false)]
+    [InlineData("Live", false, true)]
+    [InlineData("Remix", false, false)]
+    [InlineData("Remix", false, true)]
+    [InlineData("DJ-mix", false, false)]
+    [InlineData("DJ-mix", false, true)]
+    [InlineData("Demo", false, false)]
+    [InlineData("Demo", false, true)]
+    [InlineData("Live", true, false)]
+    [InlineData("Live", true, true)]
+    [InlineData("Remix", true, false)]
+    [InlineData("Remix", true, true)]
+    [InlineData("DJ-mix", true, false)]
+    [InlineData("DJ-mix", true, true)]
+    [InlineData("Demo", true, false)]
+    [InlineData("Demo", true, true)]
+    public void Cleanup_ExcludedSecondaryTypeMatch_DoesNotCleanSingle(string secondaryType, bool viaImport, bool exactMbid)
     {
         var artist = Artist();
         var liveAlbum = Album(100, "Live at the Venue", "Album");
-        liveAlbum.SecondaryTypes = new List<SecondaryAlbumType> { SecondaryAlbumType.Live };
+        liveAlbum.SecondaryTypes = new List<SecondaryAlbumType> { (SecondaryAlbumType)secondaryType };
         var single = Album(200, "Song", "Single");
         var albumService = new RecordingAlbumService(liveAlbum, single);
 
-        // Same title, duration within tolerance, different recording
+        // Exact recording IDs are deliberately excluded too, alongside title/duration matches.
         var trackService = new RecordingTrackService()
-            .WithTracks(liveAlbum.Id, Track("Song", 181000, "live-mbid", fileId: 11))
+            .WithTracks(liveAlbum.Id, Track("Song", 181000, exactMbid ? "studio-mbid" : "live-mbid", fileId: 11))
             .WithTracks(single.Id, Track("Song", 180000, "studio-mbid", fileId: 21));
 
         var mediaFileService = new RecordingMediaFileService()
@@ -1419,15 +1800,19 @@ public class SingleCleanupServiceTests
         var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
         var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album", "EP" }, Tier3Action.FlagOnly);
 
-        var result = service.ScanArtistWithOptions(artist, options);
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, liveAlbum, options)
+            : service.ScanArtistWithOptions(artist, options);
 
         Assert.Equal(0, result.Cleaned);
         Assert.Empty(albumService.SetMonitoredCalls);
         Assert.Empty(deleteMediaFiles.DeletedFiles);
     }
 
-    [Fact]
-    public void ScanArtistWithOptions_CompilationAlbumMbidMatch_StillCleansSingle()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cleanup_CompilationAlbumMbidMatch_StillCleansSingle(bool viaImport)
     {
         var artist = Artist();
         var compilation = Album(100, "Greatest Hits", "Album");
@@ -1445,9 +1830,234 @@ public class SingleCleanupServiceTests
         var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
         var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album", "EP" }, Tier3Action.FlagOnly);
 
-        var result = service.ScanArtistWithOptions(artist, options);
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, compilation, options)
+            : service.ScanArtistWithOptions(artist, options);
 
         Assert.Equal(1, result.Cleaned);
         Assert.Contains((single.Id, false), albumService.SetMonitoredCalls);
+    }
+
+    // ============================================================
+    // Lidarr History audit rows (unmonitor actions)
+    // ============================================================
+
+    [Fact]
+    public void ScanArtistWithOptions_UnmonitorSuccess_RecordsHistoryAuditRow()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var single = Album(200, "Single", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("Song", 180000, "mbid", fileId: 11))
+            .WithTracks(single.Id, Track("Song", 181000, "single-mbid", fileId: 21));
+        var mediaFileService = new RecordingMediaFileService()
+            .WithFiles(single.Id, File(901, single.Id, "/music/single.flac"));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var historyRecorder = new RecordingHistoryRecorder();
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles, historyRecorder: historyRecorder);
+        var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album" }, Tier3Action.FlagOnly);
+
+        var result = service.ScanArtistWithOptions(artist, options);
+
+        Assert.Equal(1, result.Cleaned);
+        var auditRow = Assert.Single(historyRecorder.Unmonitors);
+        Assert.Equal((artist.Id, single.Id), (auditRow.ArtistId, auditRow.AlbumId));
+        Assert.Single(deleteMediaFiles.DeletedFiles);
+    }
+
+    [Fact]
+    public void ScanArtistWithOptions_UnmonitorFailure_DoesNotRecordHistory()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var single = Album(200, "Single", "Single");
+        var albumService = new RecordingAlbumService(album, single) { ThrowOnSetAlbumMonitored = true };
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("Song", 180000, "mbid", fileId: 11))
+            .WithTracks(single.Id, Track("Song", 181000, "single-mbid", fileId: 21));
+        var mediaFileService = new RecordingMediaFileService()
+            .WithFiles(single.Id, File(901, single.Id, "/music/single.flac"));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var historyRecorder = new RecordingHistoryRecorder();
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles, historyRecorder: historyRecorder);
+        var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album" }, Tier3Action.FlagOnly);
+
+        var result = service.ScanArtistWithOptions(artist, options);
+
+        Assert.Equal(1, result.UnmonitorFailures);
+        Assert.Empty(historyRecorder.Unmonitors);
+    }
+
+    [Fact]
+    public void ScanArtistWithOptions_HistoryRecorderFailure_DoesNotBreakCleanup()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var single = Album(200, "Single", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("Song", 180000, "mbid", fileId: 11))
+            .WithTracks(single.Id, Track("Song", 181000, "single-mbid", fileId: 21));
+        var mediaFileService = new RecordingMediaFileService()
+            .WithFiles(single.Id, File(901, single.Id, "/music/single.flac"));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var historyRecorder = new RecordingHistoryRecorder { ThrowOnRecord = true };
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles, historyRecorder: historyRecorder);
+        var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album" }, Tier3Action.FlagOnly);
+
+        var exception = Record.Exception(() => service.ScanArtistWithOptions(artist, options));
+
+        Assert.Null(exception);
+        Assert.False(single.Monitored);
+        Assert.Single(deleteMediaFiles.DeletedFiles);
+    }
+
+    // ============================================================
+    // Summary reconciliation with per-release outcome lines
+    // ============================================================
+
+    [Fact]
+    public void ScanArtistWithOptions_SummaryCountersReconcileWithOutcomeLines()
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var redundantSingle = Album(200, "Hit", "Single");
+        var reviewSingle = Album(201, "Maybe Different Version", "Single");
+        var exclusiveSingle = Album(202, "Exclusive", "Single");
+        var albumService = new RecordingAlbumService(album, redundantSingle, reviewSingle, exclusiveSingle);
+        var logger = new RecordingLogger();
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id,
+                Track("Hit", 180000, "album-hit", fileId: 11),
+                Track("Song", 220000, "album-song", fileId: 12))
+            .WithTracks(redundantSingle.Id, Track("Hit", 181000, "single-hit", fileId: 21))
+            .WithTracks(reviewSingle.Id, Track("Song", 180000, "single-song", fileId: 22))
+            .WithTracks(exclusiveSingle.Id, Track("Exclusive B Side", 190000, "single-b", fileId: 23));
+        var mediaFileService = new RecordingMediaFileService()
+            .WithFiles(redundantSingle.Id, File(901, redundantSingle.Id, "/music/hit.flac"))
+            .WithFiles(reviewSingle.Id, File(902, reviewSingle.Id, "/music/review.flac"))
+            .WithFiles(exclusiveSingle.Id, File(903, exclusiveSingle.Id, "/music/exclusive.flac"));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles, logger);
+        var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album" }, Tier3Action.FlagOnly);
+
+        var result = service.ScanArtistWithOptions(artist, options);
+
+        // Counters: one cleaned, one review, one exclusive keep.
+        Assert.Equal(3, result.CandidatesChecked);
+        Assert.Equal(1, result.Cleaned);
+        Assert.Equal(1, result.ReviewNeeded);
+        Assert.Equal(1, result.KeepExclusive);
+        Assert.Equal(1, result.Skipped); // only the review-needed release remains in skipped
+        // Outcome lines agree one-to-one with the counters.
+        Assert.Equal(result.Cleaned, logger.InfoMessages.Count(m => m.Contains("outcome=cleanup-approved")));
+        Assert.Equal(result.ReviewNeeded, logger.InfoMessages.Count(m => m.Contains("outcome=unresolved-review")));
+        Assert.Equal(result.KeepExclusive, logger.InfoMessages.Count(m => m.Contains("outcome=keep-exclusive")));
+    }
+
+    // ============================================================
+    // Whole-release protection over undownloaded catalog tracks (#17)
+    // ============================================================
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cleanup_DownloadedRedundantASideWithUndownloadedExclusiveBSide_KeepsRelease(bool viaImport)
+    {
+        var artist = Artist();
+        var imported = Album(100, "Imported Album", "Album");
+        var single = Album(200, "Hit Single", "Single");
+        var albumService = new RecordingAlbumService(imported, single);
+        var logger = new RecordingLogger();
+        var trackService = new RecordingTrackService()
+            .WithTracks(imported.Id,
+                Track("A Side", 180000, "album-a", fileId: 11))
+            .WithTracks(single.Id,
+                Track("A Side", 180000, "single-a", fileId: 21),          // Downloaded, Tier-2 redundant
+                Track("Exclusive B Side", 190000, "single-b", fileId: 0)); // Undownloaded, no match → exclusive
+        var mediaFileService = new RecordingMediaFileService()
+            .WithFiles(single.Id, File(901, single.Id, "/music/a-side.flac"));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles, logger);
+        var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album" }, Tier3Action.FlagOnly);
+
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, imported, options)
+            : service.ScanArtistWithOptions(artist, options);
+
+        // The undownloaded exclusive B-side protects the whole release: keep-exclusive,
+        // no unmonitor, no deletion — same strict rule as the exact-audio path.
+        Assert.Equal(1, result.CandidatesChecked);
+        Assert.Equal(0, result.Cleaned);
+        Assert.Equal(0, result.Skipped);
+        Assert.Equal(0, result.ReviewNeeded);
+        Assert.Equal(1, result.KeepExclusive);
+        Assert.Empty(albumService.SetMonitoredCalls);
+        Assert.True(single.Monitored);
+        Assert.Empty(deleteMediaFiles.DeletedFiles);
+        Assert.Contains(logger.InfoMessages, m => m.Contains("outcome=keep-exclusive") && m.Contains("singleId=200"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cleanup_AllCatalogTracksRedundantIncludingUndownloaded_CleansRelease(bool viaImport)
+    {
+        var artist = Artist();
+        var imported = Album(100, "Imported Album", "Album");
+        var single = Album(200, "Hit Single", "Single");
+        var albumService = new RecordingAlbumService(imported, single);
+        var trackService = new RecordingTrackService()
+            .WithTracks(imported.Id,
+                Track("A Side", 180000, "album-a", fileId: 11),
+                Track("B Side", 200000, "album-b", fileId: 12))
+            .WithTracks(single.Id,
+                Track("A Side", 181000, "single-a", fileId: 21), // Downloaded, Tier-2 redundant
+                Track("B Side", 201000, "single-b", fileId: 0)); // Undownloaded, but Tier-2 redundant
+        var mediaFileService = new RecordingMediaFileService()
+            .WithFiles(single.Id, File(901, single.Id, "/music/a-side.flac"));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
+        var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album" }, Tier3Action.FlagOnly);
+
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, imported, options)
+            : service.ScanArtistWithOptions(artist, options);
+
+        // Full-catalog redundancy: cleanup behavior is unchanged by the whole-release rule.
+        Assert.Equal(1, result.CandidatesChecked);
+        Assert.Equal(1, result.Cleaned);
+        Assert.Equal(0, result.Skipped);
+        Assert.Equal(0, result.KeepExclusive);
+        Assert.Contains((single.Id, false), albumService.SetMonitoredCalls);
+        Assert.False(single.Monitored);
+        Assert.Single(deleteMediaFiles.DeletedFiles);
+    }
+
+    [Fact]
+    public void LegacyCleanupSinglesForArtist_UndownloadedExclusiveTrack_DoesNotUnmonitorOrDelete()
+    {
+        var artist = Artist();
+        var importedAlbum = Album(100, "Imported", "Album");
+        var single = Album(200, "Hit Single", "Single");
+        var albumService = new RecordingAlbumService(importedAlbum, single);
+        var trackService = new RecordingTrackService()
+            .WithTracks(importedAlbum.Id,
+                Track("A Side", 180000, "album-a", fileId: 11))
+            .WithTracks(single.Id,
+                Track("A Side", 180000, "single-a", fileId: 21),          // Downloaded, Tier-2 redundant
+                Track("Exclusive B Side", 190000, "single-b", fileId: 0)); // Undownloaded, no match → exclusive
+        var mediaFileService = new RecordingMediaFileService()
+            .WithFiles(single.Id, File(901, single.Id, "/music/a-side.flac"));
+        var deleteMediaFiles = new RecordingDeleteMediaFiles();
+        var service = Service(albumService, trackService, mediaFileService, deleteMediaFiles);
+
+        service.CleanupSinglesForArtist(artist, importedAlbum);
+
+        Assert.Empty(albumService.SetMonitoredCalls);
+        Assert.True(single.Monitored);
+        Assert.Empty(deleteMediaFiles.DeletedFiles);
     }
 }

@@ -26,7 +26,14 @@ public class SingleCleanupService : ISingleCleanupService
 {
     private static readonly StringComparer AlbumTypeComparer = StringComparer.OrdinalIgnoreCase;
 
-    private static readonly HashSet<int> ExcludedSecondaryTypeIds = new()
+    /// <summary>
+    /// Releases whose tracks are usually different recordings that share the studio title
+    /// (live, remix, DJ-mix, demo). A title + duration match against them is not evidence
+    /// that the single is redundant, so they are never used as comparison sources.
+    /// Lidarr stores these as secondary types; the primary type is still "Album" or "EP".
+    /// Internal so the eager pre-grab path (EagerSingleUnmonitorService) applies the same rule.
+    /// </summary>
+    internal static readonly HashSet<int> ExcludedSecondaryTypeIds = new()
     {
         SecondaryAlbumType.Live.Id,
         SecondaryAlbumType.Remix.Id,
@@ -38,6 +45,7 @@ public class SingleCleanupService : ISingleCleanupService
     private readonly ITrackService _trackService;
     private readonly IMediaFileService _mediaFileService;
     private readonly IDeleteMediaFiles _deleteMediaFiles;
+    private readonly ICleanupHistoryRecorder _historyRecorder;
     private readonly Logger _logger;
 
     public SingleCleanupService(
@@ -45,12 +53,14 @@ public class SingleCleanupService : ISingleCleanupService
         ITrackService trackService,
         IMediaFileService mediaFileService,
         IDeleteMediaFiles deleteMediaFiles,
+        ICleanupHistoryRecorder historyRecorder,
         Logger logger)
     {
         _albumService = albumService ?? throw new ArgumentNullException(nameof(albumService));
         _trackService = trackService ?? throw new ArgumentNullException(nameof(trackService));
         _mediaFileService = mediaFileService ?? throw new ArgumentNullException(nameof(mediaFileService));
         _deleteMediaFiles = deleteMediaFiles ?? throw new ArgumentNullException(nameof(deleteMediaFiles));
+        _historyRecorder = historyRecorder ?? throw new ArgumentNullException(nameof(historyRecorder));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -188,9 +198,10 @@ public class SingleCleanupService : ISingleCleanupService
 
         var albums = GetAlbumsForArtist(artist);
         var comparisonTracks = GetComparisonTracksByAlbum(albums, options);
-        var candidateSingles = albums
-            .Where(a => IsSingle(a) && a.Id != importedAlbum.Id)
-            .ToList();
+        var candidateSingles = OrderCandidatesForReviewPriority(
+            albums.Where(a => IsSingle(a) && a.Id != importedAlbum.Id).ToList(),
+            comparisonTracks,
+            options);
 
         _logger.Info(
             "UniqueSingles cleanup start: artistId={0} artist='{1}' importedAlbumId={2} importedAlbum='{3}' albumTrackCount={4} candidateSingles={5} comparisonReleaseTypes='{6}' durationToleranceMs={7} tier3Action='{8}'",
@@ -231,7 +242,7 @@ public class SingleCleanupService : ISingleCleanupService
 
         var albums = GetAlbumsForArtist(artist);
         var comparisonTracks = GetComparisonTracksByAlbum(albums, options);
-        var candidateSingles = albums.Where(IsSingle).ToList();
+        var candidateSingles = OrderCandidatesForReviewPriority(albums.Where(IsSingle).ToList(), comparisonTracks, options);
 
         _logger.Debug(
             "UniqueSingles scan start: artistId={0} artist='{1}' albumTrackCount={2} candidateSingles={3} comparisonReleaseTypes='{4}' durationToleranceMs={5} tier3Action='{6}'",
@@ -330,6 +341,36 @@ public class SingleCleanupService : ISingleCleanupService
                 return new CleanupResult(candidatesChecked, cleaned, 0, 0, 0, 0);
             }
 
+            // Same rule as the eager path (#26), applied by the scheduled scan and import-time
+            // cleanup too: a file-less single whose every catalog track has a Tier-1/Tier-2 match
+            // against downloaded comparison tracks is unmonitored (never deleted; there are no
+            // files). Without this, singles that existed before their album was downloaded were
+            // only ever re-checked for exact MBID matches and stayed wanted forever. #17
+            // whole-release protection and Tier-3 semantics are those of CheckSingle: any
+            // unmatched or title-only track keeps the single monitored.
+            if (options.EagerUnmonitorRedundantSingles)
+            {
+                var filelessCheck = TrackMatcher.CheckSingle(singleTracks, albumTracks, options.DurationToleranceMs);
+                if (filelessCheck.IsRedundant)
+                {
+                    _logger.Info(
+                        "UniqueSingles Tier-2 unmonitor: single has no downloaded files and every catalog track is Tier-1/Tier-2 redundant against downloaded comparison tracks. artistId={0} artist='{1}' singleId={2} single='{3}' reason=tier2-matches-no-files",
+                        artist.Id,
+                        artist.Name,
+                        single.Id,
+                        single.Title);
+
+                    if (!TryUnmonitorSingle(artist, single, comparisonAlbumContext, filelessCheck))
+                    {
+                        unmonitorFailures = 1;
+                        return new CleanupResult(candidatesChecked, cleaned, 0, 0, unmonitorFailures, 0);
+                    }
+
+                    cleaned = 1;
+                    return new CleanupResult(candidatesChecked, cleaned, 0, 0, 0, 0);
+                }
+            }
+
             _logger.Debug(
                 "UniqueSingles cleanup skip: single has no downloaded track files and is not fully Tier-1 redundant. artistId={0} artist='{1}' singleId={2} single='{3}' reason=no-downloaded-single-tracks-not-tier1",
                 artist.Id,
@@ -339,8 +380,44 @@ public class SingleCleanupService : ISingleCleanupService
             return new CleanupResult(candidatesChecked, cleaned, 1, reviewNeeded, unmonitorFailures, deleteFailures);
         }
 
-        var check = TrackMatcher.CheckSingle(downloadedSingleTracks, albumTracks, options.DurationToleranceMs);
-        LogMatchDecision(artist, single, comparisonAlbumContext, check, options.Tier3Action);
+        ExactAudioReleaseReport? cleanupReport = null;
+        // Whole-release protection (#17): every catalog track protects the release, including
+        // undownloaded ones. A track without a Tier-1/Tier-2 redundant match is exclusive
+        // content no matter whether it has a file yet, matching the strict all-catalog-tracks
+        // rule the exact-audio path already applies. Metadata evidence alone therefore never
+        // cleans a release whose catalog contains unmatched exclusive tracks.
+        var check = TrackMatcher.CheckSingle(singleTracks, albumTracks, options.DurationToleranceMs);
+        if (!check.IsRedundant && options.ExactAudioAnalysis)
+        {
+            // Review-needed candidates draw on the budget's reserved review lane and are ordered
+            // first, so comparison attempts are not consumed by earlier non-review candidates.
+            var reviewPriority = NeedsReview(check, options.Tier3Action);
+            var report = new ExactAudioReleaseReporter(_mediaFileService, _logger, new FfmpegExactAudioVerifier(options.ExactAudioDecoderPath))
+                .Analyze(single, singleTracks, comparisonTracks, options, reviewPriority);
+            if (report.Complete)
+            {
+                if (options.ExactAudioCleanup)
+                {
+                    cleanupReport = report;
+                    check = new SingleRedundancyCheck(true, check.TrackResults, "Complete verified exact-audio coverage; explicit cleanup opt-in.");
+                }
+                else if (options.Tier3Action != Tier3Action.AutoClean || check.TrackResults.Any(r => r.Tier == MatchTier.NoMatch))
+                {
+                    return new CleanupResult(1, 0, 1, 0, 0, 0, exactAudioReports: 1);
+                }
+                // Report-only evidence grants no authority. Preserve the existing metadata
+                // AutoClean decision below when its own match requirements are satisfied.
+            }
+            else
+            {
+                // Audio coverage includes every catalog track, including undownloaded
+                // exclusive B-sides. Give that whole-release keep decision precedence
+                // over review of the downloaded subset. This grants no cleanup authority.
+                check = TrackMatcher.CheckSingle(singleTracks, albumTracks, options.DurationToleranceMs);
+            }
+        }
+
+        LogMatchDecision(artist, single, comparisonAlbumContext, check, options.Tier3Action, comparisonTracks);
 
         if (!check.IsRedundant)
         {
@@ -358,7 +435,15 @@ public class SingleCleanupService : ISingleCleanupService
             }
             else
             {
-                if (options.Tier3Action == Tier3Action.FlagOnly && check.TrackResults.Any(r => r.Tier == MatchTier.Tier3_TitleOnly))
+                // Exclusive-content keeps get their own aggregate so summary counters reconcile
+                // with the per-release outcome=keep-exclusive lines; they are no longer folded
+                // into skipped. Review-needed outcomes remain skipped + reviewNeeded.
+                if (check.TrackResults.Any(r => r.Tier == MatchTier.NoMatch))
+                {
+                    return new CleanupResult(candidatesChecked, cleaned, 0, 0, unmonitorFailures, deleteFailures, keepExclusive: 1);
+                }
+
+                if (NeedsReview(check, options.Tier3Action))
                 {
                     reviewNeeded = 1;
                 }
@@ -367,6 +452,9 @@ public class SingleCleanupService : ISingleCleanupService
                 return new CleanupResult(candidatesChecked, cleaned, skipped, reviewNeeded, unmonitorFailures, deleteFailures);
             }
         }
+
+        if (cleanupReport != null && !RevalidateExactCleanup(artist, single, cleanupReport, options, null, null, out _))
+            return new CleanupResult(1, 0, 1, 0, 0, 0);
 
         if (!TryUnmonitorSingle(artist, single, comparisonAlbumContext, check))
         {
@@ -379,7 +467,10 @@ public class SingleCleanupService : ISingleCleanupService
         // other and both be deleted.
         comparisonTracks.Remove(single.Id);
 
-        if (!TryDeleteSingleFiles(artist, single, comparisonAlbumContext))
+        if (!TryDeleteSingleFiles(artist, single, comparisonAlbumContext,
+            cleanupReport == null ? null : (file, stream) =>
+                RevalidateExactCleanup(artist, single, cleanupReport, options, file, stream, out var verifiedDigest)
+                    ? verifiedDigest : null))
         {
             cleaned = 1; // Unmonitored successfully
             deleteFailures = 1;
@@ -388,6 +479,84 @@ public class SingleCleanupService : ISingleCleanupService
 
         cleaned = 1;
         return new CleanupResult(candidatesChecked, cleaned, 0, 0, 0, 0);
+    }
+
+    // Re-read repository identities and hash actual bytes. Snapshot evidence (including cached
+    // evidence) is never authority on its own. Repeated immediately before each destructive call.
+    // At deletion time the deleting file's content is verified through the caller's open guard
+    // handle so the identity check and the destructive call anchor on the same bytes.
+    private bool RevalidateExactCleanup(Artist artist, Album single, ExactAudioReleaseReport report,
+        SingleCleanupOptions options, TrackFile? deleting, System.IO.FileStream? deletingStream,
+        out string? verifiedDigest)
+    {
+        verifiedDigest = null;
+        try
+        {
+            if (options.AudioCancellation.IsCancellationRequested) throw new InvalidOperationException("cancelled");
+            // Deleting files must be verified through a held delete-guard handle, never by a
+            // fresh path read that external mutation could invalidate before the delete call.
+            if (deleting != null && deletingStream == null) throw new InvalidOperationException("delete-guard-missing");
+            var albums = _albumService.GetAlbumsByArtist(artist.Id);
+            var sources = GetComparisonTracksByAlbum(albums, options);
+            var required = _trackService.GetTracksByAlbum(single.Id);
+            var verified = report.Tracks.Where(t => t.Evidence.Status == AudioEvidenceStatus.VerifiedExact).ToList();
+            if (!report.Complete || required == null || required.Count == 0 || required.Count != verified.Count)
+                throw new InvalidOperationException("coverage-changed");
+            var candidateFiles = _mediaFileService.GetFilesByAlbum(single.Id);
+            // No extra unverified files may be swept up by whole-release deletion.
+            if (candidateFiles.Any(f => !required.Any(t => t.TrackFileId == f.Id)))
+                throw new InvalidOperationException("unverified-extra-file");
+            foreach (var track in required)
+            {
+                var evidence = verified.Single(e => e.CandidateTrackId == track.Id);
+                if (evidence.SourceReleaseId == single.Id || !sources.TryGetValue(evidence.SourceReleaseId!.Value, out var sourceTracks))
+                    throw new InvalidOperationException("source-ineligible");
+                var source = sourceTracks.Single(t => t.Id == evidence.SourceTrackId);
+                var sourceFile = _mediaFileService.GetFilesByAlbum(evidence.SourceReleaseId.Value).Single(f => f.Id == source.TrackFileId);
+                if (candidateFiles.Any(f => string.Equals(System.IO.Path.GetFullPath(f.Path), System.IO.Path.GetFullPath(sourceFile.Path), StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException("source-shares-candidate-path");
+                if (sourceFile.Path != evidence.SourcePath || !ContentMatches(sourceFile.Path, evidence.Evidence.Source?.FileDigest))
+                    throw new InvalidOperationException("source-content-changed");
+                if (deleting == null || track.TrackFileId == deleting.Id)
+                {
+                    var candidateFile = candidateFiles.Single(f => f.Id == track.TrackFileId);
+                    var digest = evidence.Evidence.Candidate?.FileDigest;
+                    var candidateUnchanged = deletingStream != null
+                        ? ContentMatches(deletingStream, digest)
+                        : ContentMatches(candidateFile.Path, digest);
+                    if (!track.HasFile || candidateFile.Path != evidence.CandidatePath
+                        || (deleting != null && deleting.Path != candidateFile.Path)
+                        || !candidateUnchanged)
+                        throw new InvalidOperationException("candidate-content-changed");
+                    if (deleting != null) verifiedDigest = digest;
+                }
+            }
+            if (deleting != null && !required.Any(t => t.TrackFileId == deleting.Id))
+                throw new InvalidOperationException("unverified-delete-file");
+            _logger.Info("UniqueSingles exact-audio cleanup: candidateReleaseId={0} decision=revalidated action={1}", single.Id, deleting == null ? "unmonitor" : "delete");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn("UniqueSingles exact-audio cleanup: candidateReleaseId={0} decision=keep reason=revalidation-failed detail={1}", single.Id, ex.Message);
+            return false;
+        }
+    }
+
+    private static bool ContentMatches(string path, string? digest)
+    {
+        if (string.IsNullOrEmpty(digest)) return false;
+        using var stream = System.IO.File.OpenRead(path);
+        if (stream.Length > 64 * 1024 * 1024) return false;
+        return string.Equals(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)), digest, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContentMatches(System.IO.Stream stream, string? digest)
+    {
+        if (string.IsNullOrEmpty(digest)) return false;
+        if (stream.Length > 64 * 1024 * 1024) return false;
+        stream.Seek(0, System.IO.SeekOrigin.Begin);
+        return string.Equals(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)), digest, StringComparison.OrdinalIgnoreCase);
     }
 
     private void CheckAndCleanSingle(Artist artist, Album single, Album? comparisonAlbumContext, List<Track> albumTracks)
@@ -457,7 +626,9 @@ public class SingleCleanupService : ISingleCleanupService
             return;
         }
 
-        var check = TrackMatcher.CheckSingle(downloadedSingleTracks, albumTracks);
+        // Whole-release protection (#17): evaluate all catalog tracks, including undownloaded
+        // ones, so an exclusive track without files keeps the release (mirrors the stats path).
+        var check = TrackMatcher.CheckSingle(singleTracks, albumTracks);
         LogMatchDecision(artist, single, comparisonAlbumContext, check);
 
         if (!check.IsRedundant)
@@ -540,7 +711,75 @@ public class SingleCleanupService : ISingleCleanupService
         return GetDownloadedAlbumOrEpTracks(albums, CreateLegacyOptions());
     }
 
-    private void LogMatchDecision(Artist artist, Album single, Album? comparisonAlbumContext, SingleRedundancyCheck check, Tier3Action tier3Action = Tier3Action.FlagOnly)
+    private static bool NeedsReview(SingleRedundancyCheck check, Tier3Action action)
+    {
+        return action == Tier3Action.FlagOnly
+            && !check.TrackResults.Any(r => r.Tier == MatchTier.NoMatch)
+            && check.TrackResults.Any(r => r.Tier == MatchTier.Tier3_TitleOnly);
+    }
+
+    /// <summary>
+    /// Orders candidate singles so review-needed candidates are analyzed first when exact-audio
+    /// analysis is enabled. Audio comparison budgets are shared across the whole command/import;
+    /// without prioritization, earlier candidates can exhaust the budget and leave review-queue
+    /// releases unresolved (production finding 2026-10-29). Classification uses the same metadata
+    /// check the cleanup path performs; a misprediction only affects ordering, never authority.
+    /// </summary>
+    private List<Album> OrderCandidatesForReviewPriority(List<Album> candidateSingles, Dictionary<int, List<Track>> comparisonTracks, SingleCleanupOptions options)
+    {
+        if (!options.ExactAudioAnalysis || candidateSingles.Count < 2)
+        {
+            return candidateSingles;
+        }
+
+        var prioritized = candidateSingles
+            .Select(a => (Album: a, ReviewPriority: WouldFlagForReview(a, comparisonTracks, options)))
+            .OrderByDescending(candidate => candidate.ReviewPriority) // stable: preserves order within each group
+            .ToList();
+
+        var reviewFirst = prioritized.Where(candidate => candidate.ReviewPriority).Select(candidate => candidate.Album.Id).ToList();
+        if (reviewFirst.Count > 0 && prioritized[0].Album.Id != candidateSingles[0].Id)
+        {
+            _logger.Info(
+                "UniqueSingles exact-audio priority: candidateReleaseIds={0} reason=review-priority-first",
+                string.Join(",", reviewFirst));
+        }
+
+        return prioritized.Select(candidate => candidate.Album).ToList();
+    }
+
+    private bool WouldFlagForReview(Album single, Dictionary<int, List<Track>> comparisonTracks, SingleCleanupOptions options)
+    {
+        try
+        {
+            if (!single.Monitored)
+            {
+                return false;
+            }
+
+            var singleTracks = _trackService.GetTracksByAlbum(single.Id) ?? new List<Track>();
+            var downloadedSingleTracks = singleTracks.Where(t => t.HasFile).ToList();
+            if (downloadedSingleTracks.Count == 0)
+            {
+                return false;
+            }
+
+            var albumTracks = comparisonTracks
+                .Where(entry => entry.Key != single.Id)
+                .SelectMany(entry => entry.Value)
+                .ToList();
+            // Classification mirrors the authority check, which evaluates every catalog track
+            // (#17): undownloaded exclusive tracks make the outcome keep-exclusive, not review.
+            return NeedsReview(TrackMatcher.CheckSingle(singleTracks, albumTracks, options.DurationToleranceMs), options.Tier3Action);
+        }
+        catch (Exception)
+        {
+            // Classification is best-effort: the authoritative decision is recomputed per candidate.
+            return false;
+        }
+    }
+
+    private void LogMatchDecision(Artist artist, Album single, Album? comparisonAlbumContext, SingleRedundancyCheck check, Tier3Action tier3Action = Tier3Action.FlagOnly, Dictionary<int, List<Track>>? comparisonTracks = null)
     {
         var decision = check.IsRedundant ? "cleanup-approved" : "cleanup-skipped";
 
@@ -549,16 +788,46 @@ public class SingleCleanupService : ISingleCleanupService
         {
             decision = "cleanup-approved";
         }
+
+        if (!check.IsRedundant && check.TrackResults.Any(r => r.Tier == MatchTier.NoMatch))
+        {
+            decision = "keep-exclusive";
+        }
+        else if (!check.IsRedundant && NeedsReview(check, tier3Action))
+        {
+            decision = "review-needed";
+        }
+
+        var reason = check.SummaryReason;
+        if (!check.IsRedundant && decision == "cleanup-approved")
+        {
+            reason = "All tracks have eligible matches; configured Tier 3 AutoClean permits title-only cleanup.";
+        }
+        else if (decision == "cleanup-skipped" && tier3Action == Tier3Action.Skip)
+        {
+            reason = "Title-only evidence is unresolved; configured Tier 3 Skip keeps this release without a review flag.";
+        }
+
+        // One outcome line per release stays at Info so it reconciles with the scan summary counters,
+        // except plain skips. Per-track evidence is the bulk of a full-library scan, so it is only
+        // logged at Info for releases a user acts on: approved cleanups and review requests.
+        var actionable = decision == "cleanup-approved" || decision == "review-needed";
+        _logger.Log(
+            decision == "cleanup-skipped" ? LogLevel.Debug : LogLevel.Info,
+            "UniqueSingles {0}: artistId={1} artist='{2}' singleId={3} single='{4}' reason='{5}' outcome={6}",
+            decision, artist.Id, artist.Name, single.Id, single.Title, reason,
+            decision == "review-needed" ? "unresolved-review" : decision);
+
         foreach (var result in check.TrackResults)
         {
-            var isReview = result.Tier == MatchTier.Tier3_TitleOnly && tier3Action == Tier3Action.FlagOnly;
-
-            // A full-library scan skips most singles; only approvals and review requests are actionable.
-            var level = isReview || decision == "cleanup-approved" ? LogLevel.Info : LogLevel.Debug;
+            // Use the repository grouping: Track.AlbumId may be unset on materialized tracks.
+            var matchedAlbumId = result.MatchedTrack == null ? (int?)null
+                : comparisonTracks?.Where(entry => entry.Value.Contains(result.MatchedTrack))
+                    .Select(entry => (int?)entry.Key).FirstOrDefault() ?? result.MatchedTrack.AlbumId;
             _logger.Log(
-                level,
-                "UniqueSingles {0}: artistId={1} artist='{2}' singleId={3} single='{4}' comparisonAlbumId={5} comparisonAlbum='{6}' track='{7}' matchedTrack='{8}' matchTier={9} confidence={10} reason='{11}' summary='{12}'",
-                isReview ? "review-needed" : decision,
+                actionable ? LogLevel.Info : LogLevel.Debug,
+                "UniqueSingles {0}: artistId={1} artist='{2}' singleId={3} single='{4}' comparisonAlbumId={5} comparisonAlbum='{6}' track='{7}' matchedTrack='{8}' matchTier={9} confidence={10} reason='{11}' summary='{12}' trackId={13} matchedAlbumId={14} matchedTrackId={15}",
+                "track-evidence",
                 artist.Id,
                 artist.Name,
                 single.Id,
@@ -570,7 +839,10 @@ public class SingleCleanupService : ISingleCleanupService
                 result.Tier,
                 result.Confidence,
                 result.Reason,
-                check.SummaryReason);
+                check.SummaryReason,
+                result.SingleTrack.Id,
+                matchedAlbumId,
+                result.MatchedTrack?.Id);
         }
 
         if (check.TrackResults.Count == 0)
@@ -602,6 +874,20 @@ public class SingleCleanupService : ISingleCleanupService
                 comparisonAlbumContext?.Id,
                 comparisonAlbumContext?.Title,
                 check.SummaryReason);
+            // Lidarr History audit row; recorder failures never affect the cleanup decision.
+            try
+            {
+                _historyRecorder.RecordUnmonitor(artist, single, check.SummaryReason);
+            }
+            catch (Exception historyEx)
+            {
+                _logger.Warn(
+                    historyEx,
+                    "UniqueSingles history: action=unmonitor-record-failed artistId={0} albumId={1} reason=history-recorder-threw",
+                    artist.Id,
+                    single.Id);
+            }
+
             return true;
         }
         catch (Exception ex)
@@ -619,7 +905,19 @@ public class SingleCleanupService : ISingleCleanupService
         }
     }
 
-    private bool TryDeleteSingleFiles(Artist artist, Album single, Album? comparisonAlbumContext)
+    /// <summary>
+    /// Deletes a release's files. When <paramref name="validate"/> is supplied (exact-audio
+    /// cleanup only), each deletion is guarded: the file is opened with write sharing denied,
+    /// its verified content identity is rechecked through that same handle, the handle is held
+    /// across the destructive call, and the pinned bytes are re-read afterwards so any in-place
+    /// mutation between the final check and deletion is detected and aborts the remaining
+    /// deletions. On Windows the share mode blocks in-place writers outright; elsewhere the
+    /// re-read detects them. A rename-over of the path remains an inherent OS-level TOCTOU
+    /// because deletion goes through Lidarr's path-based deletion service; see
+    /// docs/exact-flac-analysis.md.
+    /// </summary>
+    private bool TryDeleteSingleFiles(Artist artist, Album single, Album? comparisonAlbumContext,
+        Func<TrackFile, System.IO.FileStream?, string?>? validate = null)
     {
         List<TrackFile> files;
         try
@@ -656,9 +954,42 @@ public class SingleCleanupService : ISingleCleanupService
         var allDeleted = true;
         foreach (var file in files)
         {
+            // The delete-guard handle anchors content identity at deletion time: open before
+            // revalidation, verify through it, and keep it open across the destructive call.
+            System.IO.FileStream? guard = null;
             try
             {
+                var verifiedDigest = default(string);
+                if (validate != null)
+                {
+                    try
+                    {
+                        guard = new System.IO.FileStream(file.Path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read | System.IO.FileShare.Delete);
+                    }
+                    catch (Exception openEx)
+                    {
+                        _logger.Warn(
+                            openEx,
+                            "UniqueSingles exact-audio cleanup: candidateReleaseId={0} trackFileId={1} decision=keep reason=delete-guard-open-failed path-unverifiable-at-delete-time remainingDeletions=aborted",
+                            single.Id,
+                            file.Id);
+                        return false;
+                    }
+
+                    verifiedDigest = validate(file, guard);
+                    if (verifiedDigest == null)
+                    {
+                        return false;
+                    }
+                }
+
                 _deleteMediaFiles.DeleteTrackFile(artist, file);
+
+                if (guard != null && !DeletedContentStillMatches(guard, verifiedDigest, single.Id, file.Id))
+                {
+                    return false;
+                }
+
                 _logger.Info(
                     "UniqueSingles delete success: artistId={0} artist='{1}' singleId={2} single='{3}' comparisonAlbumId={4} comparisonAlbum='{5}' trackFileId={6} path='{7}'",
                     artist.Id,
@@ -685,9 +1016,45 @@ public class SingleCleanupService : ISingleCleanupService
                     file.Id,
                     file.Path);
             }
+            finally
+            {
+                guard?.Dispose();
+            }
         }
 
         return allDeleted;
+    }
+
+    /// <summary>
+    /// Re-reads the pinned delete-guard handle after the destructive call and compares it with
+    /// the digest verified immediately before deletion. In-place mutation of the deleted file
+    /// between the final check and deletion is therefore detected rather than silently consumed.
+    /// Any failure (including an unreadable handle) fails closed and aborts remaining deletions.
+    /// </summary>
+    private bool DeletedContentStillMatches(System.IO.FileStream deleted, string? verifiedDigest, int releaseId, int trackFileId)
+    {
+        try
+        {
+            if (ContentMatches(deleted, verifiedDigest))
+            {
+                return true;
+            }
+
+            _logger.Warn(
+                "UniqueSingles exact-audio cleanup: candidateReleaseId={0} trackFileId={1} decision=keep reason=mutation-detected-post-delete detail=deleted-content-no-longer-matches-verified-evidence remainingDeletions=aborted",
+                releaseId,
+                trackFileId);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn(
+                ex,
+                "UniqueSingles exact-audio cleanup: candidateReleaseId={0} trackFileId={1} decision=keep reason=post-delete-verify-failed detail=deleted-content-could-not-be-rechecked remainingDeletions=aborted",
+                releaseId,
+                trackFileId);
+            return false;
+        }
     }
 
     private static SingleCleanupOptions CreateLegacyOptions()
@@ -703,8 +1070,9 @@ public class SingleCleanupService : ISingleCleanupService
     /// (live, remix, DJ-mix, demo). A title + duration match against them is not evidence
     /// that the single is redundant, so they are never used as comparison sources.
     /// Lidarr stores these as secondary types; the primary type is still "Album" or "EP".
+    /// Internal so the eager pre-grab path applies the identical exclusion.
     /// </summary>
-    private static bool HasExcludedSecondaryType(Album album)
+    internal static bool HasExcludedSecondaryType(Album album)
     {
         return album.SecondaryTypes != null && album.SecondaryTypes.Any(t => ExcludedSecondaryTypeIds.Contains(t.Id));
     }

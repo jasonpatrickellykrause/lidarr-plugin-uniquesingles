@@ -1,6 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using DryIoc;
+using DryIoc.Microsoft.DependencyInjection;
+using NzbDrone.Common.Composition.Extensions;
+using NzbDrone.Core.Messaging.Events;
 using NLog;
 using NLog.Config;
 using NLog.Targets;
@@ -303,6 +308,85 @@ public class ScheduledTaskServiceTests
         Assert.Empty(repo.AllTasks);
     }
 
+    [Fact]
+    public void Handle_ProviderUpdated_Reenabled_RegistersPendingTaskAgain()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 120, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider);
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+        var taskManager = new TaskManager(repo, null!, cache, logger.Logger);
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        var definition = new MetadataDefinition { Id = 1, Enable = true };
+
+        service.Handle(new ProviderAddedEvent<IMetadata>(definition));
+        Assert.Single(taskManager.GetPending());
+
+        definition.Enable = false;
+        factory.EnabledProviders = new List<IMetadata>();
+        service.Handle(new ProviderUpdatedEvent<IMetadata>(definition));
+        Assert.Empty(taskManager.GetPending());
+
+        definition.Enable = true;
+        factory.EnabledProviders = new List<IMetadata> { provider };
+        service.Handle(new ProviderUpdatedEvent<IMetadata>(definition));
+
+        Assert.Single(repo.AllTasks);
+        Assert.Single(taskManager.GetPending());
+        service.InitializeTasks();
+        Assert.Single(repo.AllTasks);
+        Assert.Single(taskManager.GetPending());
+    }
+
+    [Theory]
+    [InlineData("initialize")]
+    [InlineData("add")]
+    [InlineData("update")]
+    [InlineData("delete")]
+    public void DisabledProvider_CacheOnlyTask_IsNoLongerPending(string trigger)
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 120, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider) { EnabledProviders = new List<IMetadata>() };
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+        var taskManager = new TaskManager(repo, null!, cache, logger.Logger);
+        cache.GetCache<ScheduledTask>(typeof(TaskManager)).Set(
+            typeof(UniqueSinglesScanCommand).FullName!,
+            new ScheduledTask
+            {
+                TypeName = typeof(UniqueSinglesScanCommand).FullName!,
+                Interval = 120,
+                LastExecution = DateTime.UtcNow.AddDays(-2)
+            });
+        Assert.Single(taskManager.GetPending());
+
+        var service = new ScheduledTaskService(factory, repo, cache, logger.Logger);
+        var definition = new MetadataDefinition { Id = 1, Enable = false };
+        switch (trigger)
+        {
+            case "initialize":
+                service.InitializeTasks();
+                break;
+            case "add":
+                service.Handle(new ProviderAddedEvent<IMetadata>(definition));
+                break;
+            case "update":
+                service.Handle(new ProviderUpdatedEvent<IMetadata>(definition));
+                break;
+            case "delete":
+                service.Handle(new ProviderDeletedEvent<IMetadata>(definition.Id));
+                break;
+        }
+
+        Assert.Empty(taskManager.GetPending());
+        Assert.Empty(repo.AllTasks);
+        Assert.Empty(repo.InsertedTasks);
+    }
+
     // ── Restart handling ──────────────────────────────────────────────
 
     [Fact]
@@ -404,6 +488,99 @@ public class ScheduledTaskServiceTests
 
         Assert.NotNull(attribute);
         Assert.Equal(NzbDrone.Core.Messaging.EventHandleOrder.Last, attribute!.EventHandleOrder);
+    }
+
+    [Fact]
+    public void HostLifecycle_RealContainerAndEvents_PreservesSchedule()
+    {
+        var provider = new StubScheduledTaskProvider(
+            typeof(UniqueSinglesScanCommand), 1440, CommandPriority.Low);
+        var factory = new StubMetadataFactory(provider);
+        var repo = new StubScheduledTaskRepository();
+        var cache = new CacheManager();
+        using var logger = new TestLogger();
+        var lastRun = DateTime.UtcNow.AddHours(-1);
+        var lastStart = lastRun.AddMinutes(-3);
+        var typeName = typeof(UniqueSinglesScanCommand).FullName!;
+        repo.AllTasks.Add(new ScheduledTask
+        {
+            Id = 7, TypeName = typeName, Interval = 1440,
+            LastExecution = lastRun, LastStartTime = lastStart
+        });
+
+        using var container = new Container(rules => rules.WithNzbDroneRules());
+        // Same reuse rules as Lidarr's AutoAddServices, restricted to these three
+        // implementations so the test cannot start unrelated host services.
+        var types = new[] { typeof(ScheduledTaskServiceStarter), typeof(ScheduledTaskService), typeof(TaskManager) };
+        container.RegisterMany(types, serviceTypeCondition: t => t.IsInterface && !t.FullName!.StartsWith("System"), reuse: Reuse.Singleton);
+        container.RegisterMany(types, serviceTypeCondition: t => !t.IsInterface && !t.FullName!.StartsWith("System"), reuse: Reuse.Transient);
+        container.RegisterInstance<IMetadataFactory>(factory);
+        container.RegisterInstance<IScheduledTaskRepository>(repo);
+        container.RegisterInstance<ICacheManager>(cache);
+        container.RegisterInstance<NzbDrone.Core.Configuration.IConfigService>(
+            DispatchProxy.Create<NzbDrone.Core.Configuration.IConfigService, ScheduleConfigProxy>());
+        container.RegisterInstance(logger.Logger);
+        var services = new NzbDrone.Common.ServiceFactory(container.GetServiceProvider());
+        var starting = services.BuildAll<IHandle<NzbDrone.Core.Lifecycle.ApplicationStartingEvent>>()
+            .OfType<ScheduledTaskServiceStarter>().Single();
+        var started = services.BuildAll<IHandle<NzbDrone.Core.Lifecycle.ApplicationStartedEvent>>()
+            .OfType<ScheduledTaskServiceStarter>().Single();
+        Assert.Same(starting, started);
+#if NET10_0_OR_GREATER
+        // Lidarr 4.x (the net10.0 build) drops lifecycle events while the host is exiting.
+        var events = new EventAggregator(logger.Logger, services,
+            DispatchProxy.Create<NzbDrone.Common.EnvironmentInfo.IRuntimeInfo, NotExitingRuntimeInfoProxy>());
+#else
+        var events = new EventAggregator(logger.Logger, services);
+#endif
+
+        events.PublishEvent(new NzbDrone.Core.Lifecycle.ApplicationStartingEvent());
+        events.PublishEvent(new NzbDrone.Core.Lifecycle.ApplicationStartedEvent());
+
+        var taskManager = services.BuildAll<NzbDrone.Core.Jobs.ITaskManager>().Single();
+        Assert.DoesNotContain(taskManager.GetPending(), t => t.TypeName == typeName);
+        // Verify completion updates the restored row and the shared cache.
+        Assert.Contains(repo.DeletedTasks, t => t.Id == 7 && t.TypeName == typeName);
+        var restored = Assert.Single(repo.AllTasks, t => t.TypeName == typeName);
+        Assert.Contains(restored, repo.InsertedTasks);
+        Assert.NotEqual(7, restored.Id);
+        Assert.Equal(lastRun, restored.LastExecution);
+        Assert.Equal(lastStart, restored.LastStartTime);
+        Assert.Same(restored, Assert.Single(taskManager.GetAll(), t => t.TypeName == typeName));
+        var commandStart = DateTime.UtcNow.AddSeconds(-1);
+        events.PublishEvent(new CommandExecutedEvent(new CommandModel
+        {
+            Body = new UniqueSinglesScanCommand(), StartedAt = commandStart
+        }));
+        Assert.True(restored.LastExecution > lastRun);
+        Assert.Equal(commandStart, restored.LastStartTime);
+        Assert.DoesNotContain(taskManager.GetPending(), t => t.TypeName == typeName);
+
+    }
+
+    public class NotExitingRuntimeInfoProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            return method!.Name switch
+            {
+                "get_IsExiting" => false,
+                _ => throw new NotSupportedException(method.Name)
+            };
+        }
+    }
+
+    public class ScheduleConfigProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            return method!.Name switch
+            {
+                "get_BackupInterval" => 1,
+                "get_RssSyncInterval" => 60,
+                _ => throw new NotSupportedException(method.Name)
+            };
+        }
     }
 
     // ── Stub implementations ──────────────────────────────────────────
@@ -559,7 +736,7 @@ public class ScheduledTaskServiceTests
         public int Count() => AllTasks.Count;
         public ScheduledTask Find(int id) => AllTasks.FirstOrDefault(t => t.Id == id)!;
         public ScheduledTask Get(int id) => AllTasks.First(t => t.Id == id);
-        public ScheduledTask Upsert(ScheduledTask model) => model;
+        public ScheduledTask Upsert(ScheduledTask model) => AllTasks.Contains(model) ? Update(model) : Insert(model);
         public void SetFields(ScheduledTask model, params System.Linq.Expressions.Expression<Func<ScheduledTask, object>>[] properties) { }
         public void Delete(int id) { var t = Find(id); if (t != null) Delete(t); }
         public IEnumerable<ScheduledTask> Get(IEnumerable<int> ids) => AllTasks.Where(t => ids.Contains(t.Id));
@@ -570,7 +747,12 @@ public class ScheduledTaskServiceTests
         public void DeleteMany(IEnumerable<int> ids) { }
         public void Purge(bool vacuum = false) { }
         public bool HasItems() => AllTasks.Count > 0;
-        public void SetLastExecutionTime(int id, DateTime executionTime, DateTime startTime) { }
+        public void SetLastExecutionTime(int id, DateTime executionTime, DateTime startTime)
+        {
+            var task = Get(id);
+            task.LastExecution = executionTime;
+            task.LastStartTime = startTime;
+        }
         public ScheduledTask Single() => AllTasks.Single();
         public ScheduledTask SingleOrDefault() => AllTasks.SingleOrDefault();
         public PagingSpec<ScheduledTask> GetPaged(PagingSpec<ScheduledTask> pagingSpec) => pagingSpec;

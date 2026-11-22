@@ -20,73 +20,125 @@ env:
 
 jobs:
   build:
-    # Lidarr installs the release asset named for its own .NET version (….net8.0.zip on Lidarr 3.x, ….net10.0.zip on
-    # Lidarr 4.x), so every release carries both. Each build compiles against the matching Lidarr source.
+    # Lidarr installs the release asset named for its own .NET version (….net8.0.zip on Lidarr 3.x,
+    # ….net10.0.zip on Lidarr 4.x), so every release carries both.
     strategy:
+      # A Windows test failure must not cancel the Linux legs that publish releases.
+      fail-fast: false
       matrix:
         include:
-          - framework: net8.0
+          - os: ubuntu-latest
+            framework: net8.0
             dotnet: 8.0.405
-            # empty: use the ext/Lidarr submodule as committed (3.x)
-            lidarr_ref: ''
             lidarr_version: 3.1.3.4968
-          - framework: net10.0
+            lidarr_ref: ''
+            publish: true
+          - os: windows-latest
+            framework: net8.0
+            dotnet: 8.0.405
+            lidarr_version: 3.1.3.4968
+            lidarr_ref: ''
+            publish: false
+          # Lidarr 4.x has no GitHub release with binaries to verify, so this leg builds the reference
+          # assemblies from source: 4.0.0.5222 on develop (nightlies are untagged).
+          - os: ubuntu-latest
+            framework: net10.0
             dotnet: 10.0.404
-            # Lidarr 4.0.0.5222 on develop (no tag for nightlies); the first .NET 10 build is abd3d101f
-            lidarr_ref: ddf8080fac613433354d4ee6a36a768148f7099e
             lidarr_version: 4.0.0.5222
-    runs-on: ubuntu-latest
+            lidarr_ref: ddf8080fac613433354d4ee6a36a768148f7099e
+            publish: true
+    name: build (${{ matrix.os }}, ${{ matrix.framework }})
+    runs-on: ${{ matrix.os }}
+    env:
+      BUILD_PROPS: -p:PluginTargetFramework=${{ matrix.framework }} -p:LidarrAssemblyVersion=${{ matrix.lidarr_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          submodules: true
           fetch-depth: 0
 
-      - name: Check out Lidarr ${{ matrix.lidarr_ref }}
-        if: matrix.lidarr_ref != ''
-        run: |
-          git -C ext/Lidarr fetch --depth 1 origin ${{ matrix.lidarr_ref }}
-          git -C ext/Lidarr checkout FETCH_HEAD
-
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ matrix.dotnet }}
 
-      - name: Pin Lidarr assembly version
+      - name: Install audio test decoder (Linux)
+        if: runner.os == 'Linux'
         run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          command -v ffmpeg
+          ffmpeg -version
+          dpkg-query --show ffmpeg
+
+      - name: Install audio test decoder (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install ffmpeg --yes --no-progress
+          Get-Command ffmpeg
+          ffmpeg -version
+
+      - name: Prepare pinned Lidarr binaries (Linux)
+        if: runner.os == 'Linux' && matrix.lidarr_ref == ''
+        run: |
+          python3 -m unittest discover -s tests -p 'test_prepare_lidarr.py'
+          python3 scripts/prepare-lidarr.py
+
+      - name: Prepare pinned Lidarr binaries (Windows)
+        if: runner.os == 'Windows' && matrix.lidarr_ref == ''
+        run: |
+          python -m unittest discover -s tests -p 'test_prepare_lidarr.py'
+          python scripts/prepare-lidarr.py
+
+      - name: Build Lidarr ${{ matrix.lidarr_version }} references from source
+        if: matrix.lidarr_ref != ''
+        run: |
+          git submodule update --init --depth 1 ext/Lidarr
+          git -C ext/Lidarr fetch --depth 1 origin ${{ matrix.lidarr_ref }}
+          git -C ext/Lidarr checkout --detach FETCH_HEAD
+
+          # Lidarr checks the version a plugin was built against, so stamp the release version.
           props=ext/Lidarr/src/Directory.Build.props
           sed -i -E "s#<AssemblyVersion>[0-9.*]+</AssemblyVersion>#<AssemblyVersion>${{ matrix.lidarr_version }}</AssemblyVersion>#" "$props"
           grep "<AssemblyVersion>${{ matrix.lidarr_version }}</AssemblyVersion>" "$props"
 
+          # Lidarr.Host pulls in Lidarr.Api.V1 and the DryIoc DI adapter the tests use. Copying package assemblies gives the same top-level DLL set as a release archive (DryIoc included).
+          dotnet build ext/Lidarr/src/NzbDrone.Host/Lidarr.Host.csproj -c Release -f ${{ matrix.framework }} \
+            -p:CopyLocalLockFileAssemblies=true -p:TreatWarningsAsErrors=false -p:WarningsNotAsErrors="NU1902%3BNU1903"
+
+          dest=_temp/lidarr/${{ matrix.lidarr_version }}
+          rm -rf "$dest" && mkdir -p "$dest"
+          cp ext/Lidarr/_output/${{ matrix.framework }}/*.dll "$dest/"
+          for dll in Lidarr.Core Lidarr.Common Lidarr.Http Lidarr.Api.V1 NLog FluentValidation Newtonsoft.Json \
+                     System.IO.Abstractions DryIoc DryIoc.Microsoft.DependencyInjection; do
+            test -f "$dest/$dll.dll" || { echo "::error::missing $dll.dll"; exit 1; }
+          done
+
       - name: Build
-        # PluginTargetFramework, not -f/TargetFramework: NuGet restore ignores a global TargetFramework.
-        # LidarrAssemblyVersion tells AssemblySmokeTests which Lidarr version to expect.
+        shell: bash
         run: |
-          props="/p:PluginTargetFramework=${{ matrix.framework }} /p:LidarrAssemblyVersion=${{ matrix.lidarr_version }}"
-          dotnet restore UniqueSingles.sln /p:WarningsNotAsErrors="NU1902%3BNU1903" $props
-          dotnet build UniqueSingles.sln -c Release /p:WarningsNotAsErrors="NU1902%3BNU1903" /p:PluginVersion=${PLUGIN_VERSION} $props
+          dotnet restore UniqueSingles.sln $BUILD_PROPS
+          dotnet build UniqueSingles.sln -c Release --no-restore -p:PluginVersion=${PLUGIN_VERSION} $BUILD_PROPS
 
       - name: Test
+        shell: bash
+        env:
+          EXPECTED_PLUGIN_VERSION: ${{ env.PLUGIN_VERSION }}
         run: |
-          dotnet test tests/UniqueSingles.Test/UniqueSingles.Test.csproj -c Release --no-build --verbosity normal /p:PluginTargetFramework=${{ matrix.framework }}
-
-      - name: Zip Plugin
-        run: |
-          cd _temp/bin/Release/${{ matrix.framework }}/UniqueSingles
-          zip /tmp/${{ env.PLUGIN_NAME }}.${{ matrix.framework }}.zip Lidarr.Plugin.UniqueSingles.dll Lidarr.Plugin.UniqueSingles.pdb
+          dotnet test tests/UniqueSingles.Test/UniqueSingles.Test.csproj -c Release --no-build --verbosity normal $BUILD_PROPS
 
       - name: Upload build artifact
+        if: matrix.publish
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.PLUGIN_NAME }}.${{ matrix.framework }}
-          path: /tmp/${{ env.PLUGIN_NAME }}.${{ matrix.framework }}.zip
+          path: _temp/bin/Release/${{ matrix.framework }}/UniqueSingles/${{ env.PLUGIN_NAME }}.${{ matrix.framework }}.zip
           if-no-files-found: error
 
   release:
     needs: build
-    if: github.ref == 'refs/heads/main'
+    # Run even if the Windows leg failed; the asset check below still requires both Linux builds.
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
@@ -96,12 +148,21 @@ jobs:
           merge-multiple: true
           path: dist
 
-      - name: Upload Release Asset
+      - name: Require both plugin builds
+        run: |
+          for framework in net8.0 net10.0; do
+            test -f "dist/${PLUGIN_NAME}.${framework}.zip" || { echo "::error::missing ${framework} build"; exit 1; }
+          done
+
+      - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.PLUGIN_VERSION }}
           name: ${{ env.PLUGIN_VERSION }}
-          draft: true
+          # A published (not draft) release, so Lidarr's update check can offer and install it (#25).
+          # run_number is monotonic, so the newest main build is always the one marked Latest.
+          draft: false
+          make_latest: true
           files: |
             dist/${{ env.PLUGIN_NAME }}.net8.0.zip
             dist/${{ env.PLUGIN_NAME }}.net10.0.zip
