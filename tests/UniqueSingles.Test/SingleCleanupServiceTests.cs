@@ -565,6 +565,57 @@ public partial class SingleCleanupServiceTests
         Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("scan start", StringComparison.Ordinal));
     }
 
+    // Fork: the outcome line stays at Info for every counted outcome so it reconciles with the
+    // summary, plain skips drop to Debug, and per-track evidence is Info only for releases a user
+    // acts on. Upstream logs all of these at Info, so this pins the fork's split across merges.
+    [Theory]
+    [InlineData("cleanup-approved", false)]
+    [InlineData("cleanup-approved", true)]
+    [InlineData("review-needed", false)]
+    [InlineData("review-needed", true)]
+    [InlineData("keep-exclusive", false)]
+    [InlineData("keep-exclusive", true)]
+    [InlineData("cleanup-skipped", false)]
+    [InlineData("cleanup-skipped", true)]
+    public void Cleanup_OutcomeAndTrackEvidenceLogLevels(string outcome, bool viaImport)
+    {
+        var artist = Artist();
+        var album = Album(100, "Album", "Album");
+        var single = Album(200, "Single", "Single");
+        var albumService = new RecordingAlbumService(album, single);
+        var logger = new RecordingLogger();
+        var singleTrack = outcome switch
+        {
+            "cleanup-approved" => Track("Song", 181000, "single-mbid", fileId: 21), // Tier 2
+            "keep-exclusive" => Track("Exclusive", 190000, "single-mbid", fileId: 21), // no match
+            _ => Track("Song", 180000, "single-mbid", fileId: 21), // Tier 3 (title only)
+        };
+        var trackService = new RecordingTrackService()
+            .WithTracks(album.Id, Track("Song", outcome == "cleanup-approved" ? 180000 : 220000, "album-mbid", fileId: 11))
+            .WithTracks(single.Id, singleTrack);
+        var mediaFileService = new RecordingMediaFileService()
+            .WithFiles(single.Id, File(901, single.Id, "/music/single.flac"));
+        var service = Service(albumService, trackService, mediaFileService, new RecordingDeleteMediaFiles(), logger);
+        var tier3 = outcome == "cleanup-skipped" ? Tier3Action.Skip : Tier3Action.FlagOnly;
+        var options = new SingleCleanupOptions(3000, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Album" }, tier3);
+
+        var result = viaImport
+            ? service.CleanupWithOptions(artist, album, options)
+            : service.ScanArtistWithOptions(artist, options);
+
+        Assert.Equal(1, result.CandidatesChecked);
+        var outcomeToken = outcome == "review-needed" ? "outcome=unresolved-review" : $"outcome={outcome}";
+        var outcomeAtInfo = outcome != "cleanup-skipped";
+        var evidenceAtInfo = outcome is "cleanup-approved" or "review-needed";
+        bool IsOutcome(string m) => m.Contains(outcomeToken, StringComparison.Ordinal) && m.Contains("singleId=200", StringComparison.Ordinal);
+        bool IsEvidence(string m) => m.Contains("track-evidence", StringComparison.Ordinal) && m.Contains("singleId=200", StringComparison.Ordinal);
+
+        Assert.Contains(outcomeAtInfo ? logger.InfoMessages : logger.DebugMessages, IsOutcome);
+        Assert.DoesNotContain(outcomeAtInfo ? logger.DebugMessages : logger.InfoMessages, IsOutcome);
+        Assert.Contains(evidenceAtInfo ? logger.InfoMessages : logger.DebugMessages, IsEvidence);
+        Assert.DoesNotContain(evidenceAtInfo ? logger.DebugMessages : logger.InfoMessages, IsEvidence);
+    }
+
     [Fact]
     public void ScanArtistWithOptions_UnmonitoredSingle_SkippedWithoutDelete()
     {
