@@ -808,12 +808,12 @@ public class SingleCleanupService : ISingleCleanupService
             reason = "Title-only evidence is unresolved; configured Tier 3 Skip keeps this release without a review flag.";
         }
 
-        // One outcome line per release stays at Info so it reconciles with the scan summary counters,
-        // except plain skips. Per-track evidence is the bulk of a full-library scan, so it is only
-        // logged at Info for releases a user acts on: approved cleanups and review requests.
+        // Fork: a full-library scan keeps or skips most singles (2,751 keep-exclusive of 3,012 on one
+        // production scan), so only releases a user acts on log at Info: approved cleanups and review
+        // requests, with their per-track evidence. The scan summary still counts keepExclusive and skipped.
         var actionable = decision == "cleanup-approved" || decision == "review-needed";
         _logger.Log(
-            decision == "cleanup-skipped" ? LogLevel.Debug : LogLevel.Info,
+            actionable ? LogLevel.Info : LogLevel.Debug,
             "UniqueSingles {0}: artistId={1} artist='{2}' singleId={3} single='{4}' reason='{5}' outcome={6}",
             decision, artist.Id, artist.Name, single.Id, single.Title, reason,
             decision == "review-needed" ? "unresolved-review" : decision);

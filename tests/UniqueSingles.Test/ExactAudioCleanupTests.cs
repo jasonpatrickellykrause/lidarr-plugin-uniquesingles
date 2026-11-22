@@ -363,7 +363,7 @@ public partial class SingleCleanupServiceTests
         Assert.Equal(0, result.Skipped);
         Assert.Equal(0, result.ReviewNeeded);
         Assert.Equal(0, result.Cleaned);
-        Assert.Equal(1, log.InfoMessages.Count(m => m.Contains("outcome=keep-exclusive") && m.Contains("singleId=200")));
+        Assert.Equal(1, log.DebugMessages.Count(m => m.Contains("outcome=keep-exclusive") && m.Contains("singleId=200")));
         Assert.Empty(h.Albums.SetMonitoredCalls);
         Assert.Empty(h.Deletes.DeletedFiles);
     }
@@ -577,7 +577,7 @@ public partial class SingleCleanupServiceTests
             if (protection.StartsWith("exclusive"))
             {
                 Assert.Equal(0, result.ReviewNeeded);
-                Assert.Contains(log.InfoMessages, m => m.Contains("keep-exclusive"));
+                Assert.Contains(log.DebugMessages, m => m.Contains("keep-exclusive"));
             }
             Assert.Empty(h.Albums.SetMonitoredCalls);
             Assert.Empty(h.Deletes.DeletedFiles);
