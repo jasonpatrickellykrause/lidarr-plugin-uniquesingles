@@ -25,6 +25,11 @@
       <_Parameter1>LidarrAssemblyVersion</_Parameter1>
       <_Parameter2>$(LidarrAssemblyVersion)</_Parameter2>
     </AssemblyAttribute>
+    <!-- PluginIdentitySmokeTests checks the plugin DLL targets the framework CI requested -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>PluginTargetFramework</_Parameter1>
+      <_Parameter2>$(PluginTargetFramework)</_Parameter2>
+    </AssemblyAttribute>
   </ItemGroup>
 
   <ItemGroup>

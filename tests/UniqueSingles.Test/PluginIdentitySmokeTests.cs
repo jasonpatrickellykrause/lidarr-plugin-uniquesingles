@@ -71,6 +71,25 @@ public class PluginIdentitySmokeTests
         Assert.True(
             nestedPluginDllEntries.Count == 0,
             $"Expected '{expectedPluginDll}' to be stored at the zip root, but found nested entries: {string.Join(", ", nestedPluginDllEntries)}");
+
+        // Lidarr loads every DLL in the plugin folder, so the package must not carry Lidarr or package assemblies.
+        Assert.Equal(
+            new[] { "Lidarr.Plugin.UniqueSingles.dll", "Lidarr.Plugin.UniqueSingles.pdb" },
+            fileEntries.OrderBy(entry => entry, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void PluginAssembly_TargetsTheFrameworkOfThisBuild()
+    {
+        // Lidarr picks the release asset by its own .NET version, so a net8.0 DLL inside the net10.0 zip
+        // (or the reverse) would install but fail to load. PluginTargetFramework is the value CI asked
+        // for (see UniqueSingles.Test.csproj), independent of what the plugin project resolved.
+        var requested = typeof(PluginIdentitySmokeTests).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+            .Cast<System.Reflection.AssemblyMetadataAttribute>()
+            .Single(attribute => attribute.Key == "PluginTargetFramework").Value;
+
+        Assert.Equal(requested, PluginFramework());
     }
 
     private static string PluginFrameworkName() =>
