@@ -1,0 +1,16 @@
+<Project>
+  <PropertyGroup>
+    <!-- LidarrAssemblyVersion comes from Directory.Build.props: scripts/prepare-lidarr.py fills the 3.x directory,
+         and the net10.0 CI leg fills the 4.x directory from a Lidarr source build (Lidarr 4.x has no release yet). -->
+    <LidarrReferenceDir>$(MSBuildThisFileDirectory)_temp/lidarr/$(LidarrAssemblyVersion)</LidarrReferenceDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="$(LidarrReferenceDir)/Lidarr.Core.dll;$(LidarrReferenceDir)/Lidarr.Common.dll;$(LidarrReferenceDir)/Lidarr.Http.dll;$(LidarrReferenceDir)/Lidarr.Api.V1.dll;$(LidarrReferenceDir)/NLog.dll;$(LidarrReferenceDir)/FluentValidation.dll;$(LidarrReferenceDir)/Newtonsoft.Json.dll;$(LidarrReferenceDir)/System.IO.Abstractions.dll">
+      <Private Condition="'$(IsTestProject)' == 'true'">true</Private>
+      <Private Condition="'$(IsTestProject)' != 'true'">false</Private>
+    </Reference>
+  </ItemGroup>
+  <Target Name="RequireLidarrReferences" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(LidarrReferenceDir)/Lidarr.Core.dll')" Text="Run python3 scripts/prepare-lidarr.py before building." />
+  </Target>
+</Project>

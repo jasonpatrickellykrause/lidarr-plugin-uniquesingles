@@ -11,9 +11,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -25,10 +25,19 @@
       <_Parameter1>LidarrAssemblyVersion</_Parameter1>
       <_Parameter2>$(LidarrAssemblyVersion)</_Parameter2>
     </AssemblyAttribute>
+    <!-- PluginIdentitySmokeTests checks the plugin DLL targets the framework CI requested -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>PluginTargetFramework</_Parameter1>
+      <_Parameter2>$(PluginTargetFramework)</_Parameter2>
+    </AssemblyAttribute>
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="SingleCleanupServiceTests.cs" />
+    <Compile Include="EagerSingleUnmonitorServiceTests.cs" />
+    <Compile Include="ExactAudioCleanupTests.cs" />
+    <Compile Include="ExactAudioVerifierTests.cs" />
+    <Compile Include="ExactAudioFollowupsTests.cs" />
     <Compile Include="Matching/TrackMatcherTests.cs" />
     <Compile Include="SingleCleanupOptionsTests.cs" />
     <Compile Include="UniqueSinglesImportCoordinatorTests.cs" />
@@ -36,11 +45,18 @@
     <Compile Include="ScheduledTaskServiceTests.cs" />
     <Compile Include="UniqueSinglesScanTaskTests.cs" />
     <Compile Include="AssemblySmokeTests.cs" />
+    <Compile Include="PluginIdentitySmokeTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\UniqueSingles\UniqueSingles.csproj" />
-    <ProjectReference Include="..\..\ext\Lidarr\src\Lidarr.Api.V1\Lidarr.Api.V1.csproj" />
-    <ProjectReference Include="..\..\ext\Lidarr\src\Lidarr.Http\Lidarr.Http.csproj" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup><None Include="AudioFixtures/*.flac" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <Import Project="../../LidarrReferences.targets" />
+  <!-- Exercise the host container registration and lifecycle dispatch using pinned binaries. -->
+  <ItemGroup>
+    <Reference Include="DryIoc" HintPath="$(LidarrReferenceDir)/DryIoc.dll" />
+    <Reference Include="DryIoc.Microsoft.DependencyInjection" HintPath="$(LidarrReferenceDir)/DryIoc.Microsoft.DependencyInjection.dll" />
   </ItemGroup>
 </Project>

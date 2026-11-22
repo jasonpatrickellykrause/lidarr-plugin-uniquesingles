@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using NzbDrone.Core.Extras.Metadata;
 using NLog;
 using NLog.Config;
 using NLog.Targets;
@@ -60,7 +62,7 @@ public class UniqueSinglesScanTaskTests
         task.Execute(command);
 
         // Total: 18 candidates, 5 cleaned, 8 skipped, 1 review, 1 unmonitor failure, 1 delete failure
-        Assert.Contains("2 artists scanned, 5 singles cleaned, 8 skipped, 1 flagged for review", command.ResultMessage);
+        Assert.Contains("2 artists scanned, 5 singles cleaned (unmonitored; deletion not guaranteed), 8 skipped, 1 flagged for review", command.ResultMessage);
     }
 
     [Fact]
@@ -218,6 +220,42 @@ public class UniqueSinglesScanTaskTests
     }
 
     [Fact]
+    public void Execute_UnboundCommandHandler_UsesDefaultsWithoutThrowing()
+    {
+        var cleanup = new StubCleanupService();
+        var task = CreateTask(cleanup, new StubArtistService(new List<Artist> { MonitoredArtist(1, "Artist") }));
+        task.Definition = null!;
+
+        task.Execute(new UniqueSinglesScanCommand());
+
+        Assert.Single(cleanup.ScannedArtists);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Execute_UnboundCommandHandler_ResolvesPersistedSettingsWithConnectPriority(bool hasConnect)
+    {
+        var cleanup = new StubCleanupService();
+        var notifications = new StubNotificationFactory(hasConnect
+            ? new List<NotificationDefinition> { new() { Settings = new UniqueSinglesSettings { DurationToleranceMs = 7000, ExactAudioAnalysis = true, ExactAudioDecoderPath = "connect-decoder" } } }
+            : new List<NotificationDefinition>());
+        var definitions = new List<MetadataDefinition>
+        {
+            new() { Implementation = "OtherProvider", Settings = new UniqueSinglesSettings { DurationToleranceMs = 9000 } },
+            new() { Implementation = nameof(UniqueSinglesScanTask), Settings = new UniqueSinglesSettings { DurationToleranceMs = 5000, ExactAudioAnalysis = true, ExactAudioDecoderPath = "metadata-decoder" } }
+        };
+        var task = CreateTask(cleanup, new StubArtistService(new List<Artist> { MonitoredArtist(1, "Artist") }),
+            notificationFactory: notifications, metadataDefinitions: definitions);
+        // Lidarr gives an unbound handler a default definition with default settings.
+        task.Execute(new UniqueSinglesScanCommand());
+
+        Assert.Equal(hasConnect ? 7000 : 5000, cleanup.LastOptions!.DurationToleranceMs);
+        Assert.True(cleanup.LastOptions.ExactAudioAnalysis);
+        Assert.Equal(hasConnect ? "connect-decoder" : "metadata-decoder", cleanup.LastOptions.ExactAudioDecoderPath);
+    }
+
+    [Fact]
     public void ResolveCleanupOptions_FallsBackToDefaults_WhenNoSettingsAtAll()
     {
         // Arrange: no notifications, no metadata provider settings
@@ -339,23 +377,89 @@ public class UniqueSinglesScanTaskTests
         Assert.Contains("2 artists scanned", command.ResultMessage);
     }
 
+    // ── Dispatcher cancellation wiring (#44) ─────────────────────────
+
+    [Fact]
+    public void Execute_LinksAudioAnalysisCancellationIntoOptions()
+    {
+        var cleanup = new StubCleanupService();
+        var task = CreateTask(cleanup, new StubArtistService(new List<Artist> { MonitoredArtist(1, "Artist") }));
+
+        task.Execute(new UniqueSinglesScanCommand());
+
+        // Options resolved from settings (precedence preserved) gain a linked dispatcher token.
+        Assert.NotNull(cleanup.LastOptions);
+        Assert.True(cleanup.LastOptions!.AudioCancellation.CanBeCanceled);
+        Assert.False(cleanup.LastOptions.AudioCancellation.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void Execute_DispatcherCancellation_StopsScanBeforeNextArtist()
+    {
+        var cleanup = new StubCleanupService();
+        using var logger = new TestLogger();
+        var cancellation = new AudioAnalysisCancellation(logger.Logger);
+        var task = CreateTask(cleanup,
+            new StubArtistService(new List<Artist> { MonitoredArtist(1, "A"), MonitoredArtist(2, "B") }),
+            logger.Logger,
+            audioCancellation: cancellation);
+
+        cancellation.Handle(new NzbDrone.Core.Lifecycle.ApplicationShutdownRequested());
+        var command = new UniqueSinglesScanCommand();
+        task.Execute(command);
+
+        Assert.Empty(cleanup.ScannedArtists);
+        Assert.Contains("stopped early", command.ResultMessage);
+        Assert.True(logger.HasMessageContaining("dispatcher cancellation requested"));
+    }
+
+    [Fact]
+    public void Execute_ResultMessageReportsKeepExclusiveAggregate()
+    {
+        var cleanupService = new StubCleanupService();
+        cleanupService.Results[1] = new CleanupResult(3, 0, 1, 1, 0, 0, keepExclusive: 2);
+        var task = CreateTask(cleanupService, new StubArtistService(new List<Artist> { MonitoredArtist(1, "Artist") }));
+
+        var command = new UniqueSinglesScanCommand();
+        task.Execute(command);
+
+        Assert.Contains("2 kept for exclusive content", command.ResultMessage);
+        Assert.Contains("0 singles cleaned (unmonitored; deletion not guaranteed)", command.ResultMessage);
+    }
+
     // ── Helper methods and stubs ──────────────────────────────────────
 
     private static UniqueSinglesScanTask CreateTask(
         StubCleanupService cleanupService,
         StubArtistService artistService,
         Logger? logger = null,
-        INotificationFactory? notificationFactory = null)
+        INotificationFactory? notificationFactory = null,
+        List<MetadataDefinition>? metadataDefinitions = null,
+        AudioAnalysisCancellation? audioCancellation = null)
     {
         var log = logger ?? new TestLogger().Logger;
         var factory = notificationFactory ?? new StubNotificationFactory();
-        var task = new UniqueSinglesScanTask(cleanupService, artistService, new Lazy<INotificationFactory>(() => factory), log);
+        var metadataFactory = DispatchProxy.Create<IMetadataFactory, MetadataFactoryProxy>();
+        ((MetadataFactoryProxy)(object)metadataFactory).Definitions = metadataDefinitions ?? new();
+        var task = new UniqueSinglesScanTask(cleanupService, artistService,
+            new Lazy<INotificationFactory>(() => factory), new Lazy<IMetadataFactory>(() => metadataFactory),
+            audioCancellation ?? new AudioAnalysisCancellation(log), log);
         // Provider infrastructure sets Definition before use; replicate in tests
         task.Definition = new NzbDrone.Core.Extras.Metadata.MetadataDefinition
         {
             Settings = new UniqueSinglesSettings()
         };
         return task;
+    }
+
+    public class MetadataFactoryProxy : DispatchProxy
+    {
+        public List<MetadataDefinition> Definitions { get; set; } = new();
+
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            return method!.Name == "All" ? Definitions : throw new NotSupportedException(method.Name);
+        }
     }
 
     private static Artist MonitoredArtist(int id, string name) => new()
@@ -406,11 +510,13 @@ public class UniqueSinglesScanTaskTests
     internal sealed class StubCleanupService : ISingleCleanupService
     {
         public List<Artist> ScannedArtists { get; } = new();
+        public SingleCleanupOptions? LastOptions { get; private set; }
         public HashSet<int> ThrowingArtistIds { get; } = new();
         public Dictionary<int, CleanupResult> Results { get; } = new();
 
         public CleanupResult ScanArtistWithOptions(Artist artist, SingleCleanupOptions options)
         {
+            LastOptions = options;
             ScannedArtists.Add(artist);
             if (ThrowingArtistIds.Contains(artist.Id))
             {
