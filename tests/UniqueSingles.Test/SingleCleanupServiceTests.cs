@@ -554,10 +554,11 @@ public partial class SingleCleanupServiceTests
         // Review requests keep their release outcome and per-track evidence at Info.
         Assert.Contains(logger.InfoMessages, m => m.Contains("outcome=unresolved-review", StringComparison.Ordinal) && m.Contains("singleId=200", StringComparison.Ordinal));
         Assert.Contains(logger.InfoMessages, m => m.Contains("track-evidence", StringComparison.Ordinal) && m.Contains("track='Song'", StringComparison.Ordinal));
-        // An exclusive keep logs its outcome at Info, but its per-track evidence is routine.
-        Assert.Contains(logger.InfoMessages, m => m.Contains("outcome=keep-exclusive", StringComparison.Ordinal) && m.Contains("singleId=201", StringComparison.Ordinal));
+        // An exclusive keep is routine: its outcome and per-track evidence log at Debug only.
+        Assert.Contains(logger.DebugMessages, m => m.Contains("outcome=keep-exclusive", StringComparison.Ordinal) && m.Contains("singleId=201", StringComparison.Ordinal));
         Assert.Contains(logger.DebugMessages, m => m.Contains("track-evidence", StringComparison.Ordinal) && m.Contains("track='Exclusive'", StringComparison.Ordinal) && m.Contains("matchTier=NoMatch", StringComparison.Ordinal));
         Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("track='Exclusive'", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("singleId=201", StringComparison.Ordinal));
         Assert.Contains(logger.DebugMessages, m => m.Contains("single already unmonitored", StringComparison.Ordinal));
         Assert.Contains(logger.DebugMessages, m => m.Contains("UniqueSingles scan start", StringComparison.Ordinal));
         Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("cleanup-skipped", StringComparison.Ordinal));
@@ -565,9 +566,9 @@ public partial class SingleCleanupServiceTests
         Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("scan start", StringComparison.Ordinal));
     }
 
-    // Fork: the outcome line stays at Info for every counted outcome so it reconciles with the
-    // summary, plain skips drop to Debug, and per-track evidence is Info only for releases a user
-    // acts on. Upstream logs all of these at Info, so this pins the fork's split across merges.
+    // Fork: only releases a user acts on (cleanup-approved, review-needed) log their outcome and
+    // per-track evidence at Info; keep-exclusive and cleanup-skipped are routine and log at Debug.
+    // Upstream logs all of these at Info, so this pins the fork's split across merges.
     [Theory]
     [InlineData("cleanup-approved", false)]
     [InlineData("cleanup-approved", true)]
@@ -605,7 +606,7 @@ public partial class SingleCleanupServiceTests
 
         Assert.Equal(1, result.CandidatesChecked);
         var outcomeToken = outcome == "review-needed" ? "outcome=unresolved-review" : $"outcome={outcome}";
-        var outcomeAtInfo = outcome != "cleanup-skipped";
+        var outcomeAtInfo = outcome is "cleanup-approved" or "review-needed";
         var evidenceAtInfo = outcome is "cleanup-approved" or "review-needed";
         bool IsOutcome(string m) => m.Contains(outcomeToken, StringComparison.Ordinal) && m.Contains("singleId=200", StringComparison.Ordinal);
         bool IsEvidence(string m) => m.Contains("track-evidence", StringComparison.Ordinal) && m.Contains("singleId=200", StringComparison.Ordinal);
@@ -913,7 +914,7 @@ public partial class SingleCleanupServiceTests
         Assert.True(System.IO.File.Exists(candidatePath));
         Assert.Empty(albumService.SetMonitoredCalls);
         Assert.Empty(deletes.DeletedFiles);
-        Assert.Contains(logger.InfoMessages, m => m.Contains("keep-exclusive") && m.Contains("singleId=200"));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("keep-exclusive") && m.Contains("singleId=200"));
         Assert.DoesNotContain(logger.InfoMessages, m => m.Contains("review-needed"));
         // Fork: per-track evidence for a kept release is routine, so it logs at Debug.
         Assert.Contains(logger.DebugMessages, m => m.Contains(duplicateAside ? "Tier2_TitleDuration" : "Tier3_TitleOnly") && m.Contains("A-side"));
@@ -2005,7 +2006,7 @@ public partial class SingleCleanupServiceTests
         // Outcome lines agree one-to-one with the counters.
         Assert.Equal(result.Cleaned, logger.InfoMessages.Count(m => m.Contains("outcome=cleanup-approved")));
         Assert.Equal(result.ReviewNeeded, logger.InfoMessages.Count(m => m.Contains("outcome=unresolved-review")));
-        Assert.Equal(result.KeepExclusive, logger.InfoMessages.Count(m => m.Contains("outcome=keep-exclusive")));
+        Assert.Equal(result.KeepExclusive, logger.DebugMessages.Count(m => m.Contains("outcome=keep-exclusive")));
     }
 
     // ============================================================
@@ -2048,7 +2049,7 @@ public partial class SingleCleanupServiceTests
         Assert.Empty(albumService.SetMonitoredCalls);
         Assert.True(single.Monitored);
         Assert.Empty(deleteMediaFiles.DeletedFiles);
-        Assert.Contains(logger.InfoMessages, m => m.Contains("outcome=keep-exclusive") && m.Contains("singleId=200"));
+        Assert.Contains(logger.DebugMessages, m => m.Contains("outcome=keep-exclusive") && m.Contains("singleId=200"));
     }
 
     [Theory]

@@ -100,12 +100,12 @@ Every path applies the same whole-release protection: a single with any catalog 
 
 At Lidarr's default **Info** log level, Unique Singles logs the following. Search the logs for `UniqueSingles` to find them.
 
-- One outcome line per single it decides on: `cleanup-approved`, `review-needed` (`outcome=unresolved-review`), or `keep-exclusive`
+- An outcome line for each single it cleans up (`cleanup-approved`) or flags for review (`review-needed`, `outcome=unresolved-review`)
 - Per-track match details (`track-evidence`) for approved cleanups and reviews
 - Unmonitor and delete results
-- A summary at the end of each scan
+- A summary at the end of each scan, which counts the singles it kept (`keepExclusive=`) and skipped (`skipped=`)
 
-Singles that are skipped, and the per-track details for singles that are kept, log at **Debug**. To see why the plugin skipped or kept a single, set **Settings → General → Logging → Log Level** to **Debug**. A full-library scan writes one line per candidate track at that level, so set it back to **Info** afterward.
+Singles that are kept because they have exclusive tracks (`keep-exclusive`) or skipped (`cleanup-skipped`) log at **Debug**, with their per-track details. On a large library they are most of a scan. To see why the plugin skipped or kept a single, set **Settings → General → Logging → Log Level** to **Debug**. A full-library scan writes one line per candidate track at that level, so set it back to **Info** afterward.
 
 ## Known Issues
 

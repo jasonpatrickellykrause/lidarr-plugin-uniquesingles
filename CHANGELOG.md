@@ -9,7 +9,7 @@ All notable changes to Unique Singles will be documented in this file.
 This release is published from the fork at jasonpatrickellykrause/lidarr-plugin-uniquesingles. It includes every upstream change below, up to upstream 1.0.2.130, plus these fork changes:
 
 - A `net10.0` build for Lidarr 4.x. Each release has `Lidarr.Plugin.UniqueSingles.net8.0.zip` for Lidarr 3.x and `Lidarr.Plugin.UniqueSingles.net10.0.zip` for Lidarr 4.x; Lidarr installs the one for its own .NET version. Lidarr 4.x has no release with binaries to verify, so CI builds the 4.0.0.5222 reference assemblies from source.
-- Routine log lines log at Debug instead of Info: per-track `track-evidence` lines for releases that are skipped or kept, `cleanup-skipped` outcome lines, singles that are already unmonitored or have no files, and the per-artist scan start line. Approved cleanups, `review-needed` and `keep-exclusive` outcome lines, unmonitor and delete results, and scan summaries still log at Info.
+- Routine log lines log at Debug instead of Info: `keep-exclusive` and `cleanup-skipped` outcome lines and their per-track `track-evidence`, singles that are already unmonitored or have no files, and the per-artist scan start line. Approved cleanups and `review-needed` outcomes with their track evidence, unmonitor and delete results, and scan summaries still log at Info. 1.1.0.9 had left `keep-exclusive` outcome lines at Info, which on a 3,012-single library raised a full scan from 124 to 2,851 Info lines.
 - Releases are numbered 1.1.0.x and the plugin installs from and checks for updates against the fork.
 
 ### Fixed
