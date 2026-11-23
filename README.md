@@ -96,6 +96,8 @@ Singles with downloaded files are checked with all three tiers, and redundant on
 
 Every path applies the same whole-release protection: a single with any catalog track that has no Tier-1/Tier-2 match — downloaded or not — is exclusive content and is never unmonitored or deleted, and title-only (Tier 3) matches never unmonitor a file-less single. See [eager unmonitor design](docs/eager-unmonitor.md) for the hook points and why a grab-time hook is not used.
 
+When Unique Singles deletes a single's audio, it also removes the rest of the single's folder. Sidecar files such as `album.nfo`, `cover.jpg`, and `.lrc` lyrics go to Lidarr's recycle bin next to the deleted audio (or are deleted if no recycle bin is set), and then the empty folder is removed. The folder stays if it isn't inside the artist folder, has subfolders, holds files Lidarr tracks for another release, or still contains audio files Lidarr doesn't track.
+
 ## Logs
 
 At Lidarr's default **Info** log level, Unique Singles logs the following. Search the logs for `UniqueSingles` to find them.

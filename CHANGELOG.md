@@ -11,6 +11,7 @@ This release is published from the fork at jasonpatrickellykrause/lidarr-plugin-
 - A `net10.0` build for Lidarr 4.x. Each release has `Lidarr.Plugin.UniqueSingles.net8.0.zip` for Lidarr 3.x and `Lidarr.Plugin.UniqueSingles.net10.0.zip` for Lidarr 4.x; Lidarr installs the one for its own .NET version. Lidarr 4.x has no release with binaries to verify, so CI builds the 4.0.0.5222 reference assemblies from source.
 - Routine log lines log at Debug instead of Info: `keep-exclusive` and `cleanup-skipped` outcome lines and their per-track `track-evidence`, singles that are already unmonitored or have no files, and the per-artist scan start line. Approved cleanups and `review-needed` outcomes with their track evidence, unmonitor and delete results, and scan summaries still log at Info. 1.1.0.9 had left `keep-exclusive` outcome lines at Info, which on a 3,012-single library raised a full scan from 124 to 2,851 Info lines.
 - Releases are numbered 1.1.0.x and the plugin installs from and checks for updates against the fork.
+- Deleting a redundant single now removes its whole folder. Before, only the audio files were deleted, so sidecar files such as `album.nfo`, `cover.jpg`, `folder.jpg`, and `.lrc` lyrics kept the folder alive, and Lidarr's empty-folder cleanup skipped it. The leftovers now go to Lidarr's recycle bin under the same subfolder as the deleted audio, and the empty folder is removed. The folder is kept if it isn't inside the artist folder, has subfolders, holds another release's tracked files, or still has untracked audio.
 
 ### Fixed
 
