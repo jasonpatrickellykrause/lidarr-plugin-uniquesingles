@@ -26,7 +26,7 @@ The fork's earlier fixes were merged into the original plugin ([#27](https://git
 2. Paste the repository URL:
 
    ```
-   https://github.com/jasonpatrickellykrause/lidarr-plugin-uniquesingles
+   https://github.com/matrix-runout/lidarr-plugin-uniquesingles
    ```
 
 3. Click **Install**
@@ -43,6 +43,16 @@ This repository is a maintained fork of [jtstothard/lidarr-plugin-uniquesingles]
 3. Install this fork using the steps above.
 
 Your Unique Singles entries under **Settings → Connect** and **Settings → Metadata** are stored by Lidarr, not by the plugin, so they are kept.
+
+### Installed before the move to matrix-runout?
+
+This fork moved to `matrix-runout/lidarr-plugin-uniquesingles` from its previous GitHub account. For the same folder reason, an update from the new location installs a second copy next to the old one. Reinstall once:
+
+1. Go to **System → Plugins** and uninstall Unique Singles.
+2. Install it again from `https://github.com/matrix-runout/lidarr-plugin-uniquesingles`.
+3. Restart Lidarr.
+
+Your Unique Singles settings are kept.
 
 ## Configuration
 

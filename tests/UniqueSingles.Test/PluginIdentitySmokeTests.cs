@@ -29,8 +29,8 @@ public class PluginIdentitySmokeTests
 
         var plugin = Assert.IsType<UniqueSinglesPlugin>(Activator.CreateInstance(pluginType));
         Assert.Equal("Unique Singles", plugin.Name);
-        Assert.Equal("jasonpatrickellykrause", plugin.Owner);
-        Assert.Equal("https://github.com/jasonpatrickellykrause/lidarr-plugin-uniquesingles", plugin.GithubUrl);
+        Assert.Equal("matrix-runout", plugin.Owner);
+        Assert.Equal("https://github.com/matrix-runout/lidarr-plugin-uniquesingles", plugin.GithubUrl);
         Assert.Equal("Lidarr.Plugin.UniqueSingles", assembly.GetName().Name);
     }
 
