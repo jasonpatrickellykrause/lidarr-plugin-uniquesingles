@@ -10,7 +10,7 @@ Build hosts need Python 3.11+ and the .NET 8 SDK (CI uses 8.0.405). The preparat
 script supports Linux, macOS, and Windows on x64, and Linux/macOS on arm64.
 
 ```bash
-git clone https://github.com/jasonpatrickellykrause/lidarr-plugin-uniquesingles.git
+git clone https://github.com/matrix-runout/lidarr-plugin-uniquesingles.git
 cd lidarr-plugin-uniquesingles
 python3 scripts/prepare-lidarr.py
 ```
